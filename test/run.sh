@@ -12,7 +12,7 @@ ROOT="$(cd -- "$(dirname -- "$0")/.." && pwd -P)"
 SANDBOX="$(mktemp -d "${TMPDIR:-/tmp}/macos-test.XXXXXX")"
 trap 'rm -rf "$SANDBOX"' EXIT
 
-STUBBED_TOOLS="defaults killall osascript scutil sudo brew mas dockutil duti softwareupdate stow hidutil pmset socketfilterfw gh op"
+STUBBED_TOOLS="defaults killall osascript scutil sudo brew mas dockutil duti softwareupdate stow hidutil pmset gh op"
 
 export HOME="$SANDBOX/home"
 export MACOS_STATE="$SANDBOX/state"
@@ -26,6 +26,12 @@ for t in $STUBBED_TOOLS; do
   ln -s "$ROOT/test/stubs/stub" "$SANDBOX/bin/$t"
 done
 export PATH="$SANDBOX/bin:$PATH"
+for t in socketfilterfw activateSettings op-ssh-sign; do
+  ln -s "$ROOT/test/stubs/stub" "$SANDBOX/bin/$t"
+done
+export SOCKETFILTERFW="$SANDBOX/bin/socketfilterfw"
+export ACTIVATE_SETTINGS="$SANDBOX/bin/activateSettings"
+export OP_SSH_SIGN="$SANDBOX/bin/op-ssh-sign"
 
 # Guard 1: refuse to run at all unless the stubs win PATH resolution.
 for t in $STUBBED_TOOLS; do
@@ -107,10 +113,20 @@ section "Safety guards"
 
 t_no_absolute_system_tools() {
   # Absolute paths would bypass the PATH stubs and hit the real machine.
-  ! grep -nE '/usr/bin/(defaults|killall|osascript|sudo)|/usr/sbin/(scutil|softwareupdate)|/usr/libexec/ApplicationFirewall' \
-    $ENGINE_SH | grep -v '^[^:]*test/run.sh:'
+  # Tools that only exist off-PATH are named once, in lib/sys.sh.
+  ! grep -nE '/usr/bin/(defaults|killall|osascript|sudo)|/usr/sbin/(scutil|softwareupdate)|ApplicationFirewall/|activateSettings$|Resources/activateSettings|op-ssh-sign' \
+    $ENGINE_SH | grep -vE '^[^:]*(test/run\.sh|lib/sys\.sh):'
 }
-check "no absolute paths to stubbed system tools" t_no_absolute_system_tools
+check "no absolute paths to system tools outside lib/sys.sh" t_no_absolute_system_tools
+
+t_sys_overridable() {
+  (
+    SOCKETFILTERFW="$SANDBOX/bin/sudo" ACTIVATE_SETTINGS="$SANDBOX/bin/sudo" OP_SSH_SIGN="$SANDBOX/bin/sudo"
+    . "$ROOT/lib/sys.sh"
+    [ "$SOCKETFILTERFW" = "$SANDBOX/bin/sudo" ] && [ "$ACTIVATE_SETTINGS" = "$SANDBOX/bin/sudo" ] && [ "$OP_SSH_SIGN" = "$SANDBOX/bin/sudo" ]
+  )
+}
+check "off-PATH tool paths in lib/sys.sh are overridable" t_sys_overridable
 
 t_stub_records() {
   : >"$STUB_LOG"

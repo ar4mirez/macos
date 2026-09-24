@@ -60,7 +60,7 @@ macos uninstall   Unlink dotfiles, remove the engine (apps are left alone)
 
 - The tests run under `/bin/bash` 3.2.
 - Every system-mutating tool (`defaults`, `brew`, `sudo`, `killall`, …) is replaced by a stub on `PATH`. This stub is what isolates the tests: `defaults` ignores `$HOME`, so redirecting `HOME` alone would still write the real preferences.
-- A guard fails the run if any engine script calls a system tool by absolute path.
+- A guard fails the run if any engine script calls a system tool by absolute path. Tools that exist only off `PATH` (firewall, `activateSettings`, `op-ssh-sign`) are named once, in `lib/sys.sh`, and can be overridden.
 
 Conventions:
 - **Bash version:** `bin/macos`, `lib/*.sh` and any subcommand marked `# macos:bash=3` must stay **bash 3.2-safe**, because they run before Homebrew's bash is installed. Every other subcommand runs under bash 4+.

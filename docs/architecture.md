@@ -28,7 +28,9 @@ The engine (this repo, public) holds no personal data. Brewfiles, `defaults.conf
 ## Bootstrap constraints
 - **No stdin:** under `curl | bash`, stdin is the pipe, so prompts read from `/dev/tty`. `MACOS_PROFILE=… MACOS_YES=1` runs the whole thing without prompts.
 - **Old bash:** a fresh Mac only has `/bin/bash` 3.2, so `boot.sh`, `bin/macos`, `lib/` and `bootstrap` must stay 3.2-safe.
-- **Clone over HTTPS:** the private dotfiles repo is cloned over HTTPS, with `gh` as the credential helper. SSH isn't usable until 1Password's agent is running.
+- **Clone over HTTPS:** the private dotfiles repo is cloned over HTTPS, with `gh` as the **only** credential helper. SSH isn't usable until 1Password's agent is running, so `gh` stays on `git_protocol https` until identity is verified.
+  - `git -c credential.helper=` must come before `-c credential.helper='!gh auth git-credential'`. The empty value clears the Command Line Tools' system `osxkeychain` helper. Otherwise that helper answers first with whatever token it cached earlier and keeps a copy of every new one. After `gh auth refresh`, that cached token is stale, and pushes fail even though `gh` holds the right scopes.
+  - The same reset is persisted in each clone's `.git/config`.
 - **Manual GUI steps:** some steps can't be scripted: 1Password sign-in and turning on its SSH agent, Tailscale's system-extension approval, App Store sign-in, and approving configuration profiles. They are recorded in `~/.local/state/macos/pending` and shown by `doctor` as warnings.
 - **Signing last:** commit signing is enabled only after the 1Password agent is confirmed working.
 

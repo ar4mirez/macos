@@ -13,6 +13,8 @@ export MACOS_ROOT
 . "$MACOS_ROOT/lib/env.sh"
 # shellcheck source=lib/log.sh
 . "$MACOS_ROOT/lib/log.sh"
+# shellcheck source=lib/sys.sh
+. "$MACOS_ROOT/lib/sys.sh"
 
 # One EXIT trap for the whole process; libraries register cleanups here
 # instead of overwriting each other's traps.
