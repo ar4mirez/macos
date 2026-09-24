@@ -7,10 +7,11 @@
 : "${MACOS_YES:=0}"
 : "${MACOS_TTY:=/dev/tty}"
 
-_prompt_open() {
+_prompt_open() { # _prompt_open [what is being asked]
   if [ -z "${_MACOS_PROMPT_FD_OPEN:-}" ]; then
     # shellcheck disable=SC2261
-    { exec 3<"$MACOS_TTY"; } 2>/dev/null || die "no terminal to prompt on; set MACOS_YES=1 and pass the needed options (e.g. --profile)"
+    { exec 3<"$MACOS_TTY"; } 2>/dev/null ||
+      die "no terminal to prompt on${1:+ for '$1'}; run from a terminal app, or pass every answer as an option with --yes"
     _MACOS_PROMPT_FD_OPEN=1
   fi
 }
@@ -23,7 +24,7 @@ ask() {
     printf -v "$_var" '%s' "$_def"
     return 0
   fi
-  _prompt_open
+  _prompt_open "$_q"
   if [ -n "$_def" ]; then
     printf '%s [%s]: ' "$_q" "$_def" >&2
   else
@@ -44,7 +45,7 @@ choose() {
     printf -v "$_var" '%s' "$1"
     return 0
   fi
-  _prompt_open
+  _prompt_open "$_q"
   printf '%s\n' "$_q" >&2
   _i=1
   for _opt in "$@"; do
@@ -71,7 +72,7 @@ choose() {
 confirm() {
   local _ans=""
   [ "$MACOS_YES" = 1 ] && return 0
-  _prompt_open
+  _prompt_open "$1"
   printf '%s [y/N]: ' "$1" >&2
   IFS= read -r _ans <&3 || true
   case "$_ans" in y | Y | yes | YES) return 0 ;; esac

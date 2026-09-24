@@ -314,7 +314,7 @@ check "ask without a default fails under MACOS_YES" t_ask_yes_needs_default
 t_no_tty() {
   local out
   out="$(MACOS_TTY=/nonexistent/tty /bin/bash -c "$PROMPT_LIBS"'ask h "Name"' _ "$ROOT" 2>&1)" && return 1
-  printf '%s' "$out" | grep -q 'no terminal to prompt on'
+  printf '%s' "$out" | grep -q "no terminal to prompt on for 'Name'"
 }
 check "prompting without a terminal fails with guidance" t_no_tty
 
@@ -488,6 +488,19 @@ t_bootstrap_dry_run() {
   grep -q 'would run: sudo scutil --set' "$SANDBOX/o"
 }
 check "bootstrap --dry-run changes nothing and shows the plan" t_bootstrap_dry_run
+
+t_bootstrap_sudo_preflight() {
+  # No cached sudo and no terminal: stop before any step runs.
+  bootstrap_env
+  STUB_SUDO_RC=1 "$M" bootstrap --yes --profile work --hostname x </dev/null >"$SANDBOX/o" 2>&1 && return 1
+  grep -q 'no terminal to type the password in' "$SANDBOX/o" && ! grep -q '==> Profile' "$SANDBOX/o" &&
+    [ ! -f "$MACOS_STATE/machine.env" ]
+}
+if (exec </dev/tty) 2>/dev/null; then
+  printf '  skip sudo preflight test (this shell has a terminal)\n'
+else
+  check "bootstrap stops before any change when sudo cannot prompt" t_bootstrap_sudo_preflight
+fi
 
 t_bootstrap_interactive() {
   bootstrap_env

@@ -21,3 +21,13 @@ sudo_keepalive() {
   _MACOS_SUDO_PID=$!
   on_exit 'kill "$_MACOS_SUDO_PID" 2>/dev/null || true'
 }
+
+# sudo_preflight — fail before changing anything when sudo will be needed but
+# cannot ask for a password (no terminal, e.g. an IDE or agent shell).
+# sudo prompts on /dev/tty itself, regardless of stdin.
+sudo_preflight() {
+  dry_run && return 0
+  sudo -n true 2>/dev/null && return 0
+  (exec </dev/tty) 2>/dev/null && return 0
+  die "administrator access is needed, but there is no terminal to type the password in. Run this from a terminal app (e.g. Terminal.app)."
+}

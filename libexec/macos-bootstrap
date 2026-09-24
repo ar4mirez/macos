@@ -32,6 +32,7 @@ while [ $# -gt 0 ]; do
 done
 export MACOS_YES MACOS_DRY_RUN
 
+sudo_preflight
 lock_acquire
 dry_run || log_to_file
 dry_run && say "Dry run: nothing will be changed (running under bash $BASH_VERSION)."
