@@ -275,6 +275,40 @@ $lines
 EOF
 }
 
+# --- GitHub host keys ------------------------------------------------------
+
+# identity_known_hosts — pin github.com's host keys in ~/.ssh/known_hosts,
+# taken from GitHub's API over authenticated HTTPS (not trust-on-first-use
+# ssh-keyscan). Without them a fresh Mac's first ssh to GitHub stops to ask,
+# and non-interactive runs (BatchMode, `macos update`) fail.
+identity_known_hosts() {
+  local file="$HOME/.ssh/known_hosts" keys key added=0
+  keys="$(gh api meta -q '.ssh_keys[]' 2>/dev/null || true)"
+  if [ -z "$keys" ]; then
+    warn "could not fetch GitHub's host keys; the first ssh to GitHub will ask to trust it"
+    return 0
+  fi
+  while IFS= read -r key; do
+    [ -n "$key" ] || continue
+    if [ -f "$file" ] && grep -qxF "github.com $key" "$file"; then
+      continue
+    fi
+    if dry_run; then
+      printf '  would add to %s: github.com %s\n' "$file" "${key%% *}" >&2
+    else
+      printf 'github.com %s\n' "$key" >>"$file"
+    fi
+    added=$((added + 1))
+  done <<EOF
+$keys
+EOF
+  if [ "$added" -gt 0 ]; then
+    ok "pinned $added GitHub host key(s) in ~/.ssh/known_hosts (from GitHub's API)"
+  else
+    skip "GitHub host keys already known"
+  fi
+}
+
 # --- all -------------------------------------------------------------------
 
 identity_apply() {
@@ -305,6 +339,7 @@ identity_apply() {
     printf 'verified %s\n' "$(date +%Y-%m-%dT%H:%M:%S)" | write_file "$IDENTITY_VERIFIED"
   fi
   dotfiles_link
+  identity_known_hosts
   identity_upload_keys "$lines"
   if [ "$(gh config get git_protocol -h github.com 2>/dev/null)" != ssh ]; then
     run gh config set git_protocol ssh -h github.com

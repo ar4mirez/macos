@@ -1233,6 +1233,17 @@ t_doctor_ssh_greeting() {
 }
 check "doctor accepts GitHub's ssh greeting although ssh -T exits 1" t_doctor_ssh_greeting
 
+t_identity_known_hosts() {
+  identity_env; agent_up
+  local meta; meta="$(printf 'ssh-ed25519 AAAAhostkeyED\necdsa-sha2-nistp256 AAAAhostkeyEC')"
+  STUB_GH_API_USER_OUT=ar4mirez STUB_GH_API_META_OUT="$meta" "$M" identity --yes >"$SANDBOX/o" 2>&1 || { cat "$SANDBOX/o"; return 1; }
+  grep -qx 'github.com ssh-ed25519 AAAAhostkeyED' "$HOME/.ssh/known_hosts" &&
+    grep -qx 'github.com ecdsa-sha2-nistp256 AAAAhostkeyEC' "$HOME/.ssh/known_hosts" || { cat "$SANDBOX/o"; return 1; }
+  STUB_GH_API_USER_OUT=ar4mirez STUB_GH_API_META_OUT="$meta" "$M" identity --yes >"$SANDBOX/o" 2>&1
+  [ "$(wc -l <"$HOME/.ssh/known_hosts" | tr -d ' ')" -eq 2 ] && grep -q 'GitHub host keys already known' "$SANDBOX/o"
+}
+check "identity pins GitHub's host keys from its API, once" t_identity_known_hosts
+
 t_apply_never_waits_for_agent() {
   identity_env; agent_down
   "$M" apply </dev/null >"$SANDBOX/o" 2>&1 || { cat "$SANDBOX/o"; return 1; }
