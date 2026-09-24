@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # macos:summary=First-run setup of a new Mac (profile, security, apps, dotfiles, defaults, identity)
-# macos:usage=macos bootstrap [--profile work|personal|base] [--hostname <name>] [--yes] [--dry-run]
+# macos:usage=macos bootstrap [--profile work|personal|base] [--addons "<name>..."] [--hostname <name>] [--yes] [--dry-run]
 # macos:bash=3
 #
 # Runs before Homebrew bash exists, so this file must stay bash-3.2-safe.
@@ -15,14 +15,17 @@ done
 unset _lib
 
 : "${MACOS_DOTFILES_REPO:=https://github.com/ar4mirez/macos-dotfiles.git}"
-PROFILES="work personal base"
+PROFILES="$MAIN_PROFILES"
 
 profile="${MACOS_PROFILE:-}"
 hostname=""
+addons="${MACOS_ADDONS:-}"
 while [ $# -gt 0 ]; do
   case "$1" in
     --profile) profile="${2:?--profile needs a value}"; shift 2 ;;
     --profile=*) profile="${1#*=}"; shift ;;
+    --addons) addons="${2?--addons needs a value}"; shift 2 ;;
+    --addons=*) addons="${1#*=}"; shift ;;
     --hostname) hostname="${2:?--hostname needs a value}"; shift 2 ;;
     --hostname=*) hostname="${1#*=}"; shift ;;
     -y | --yes) MACOS_YES=1; shift ;;
@@ -64,9 +67,11 @@ if [ -z "$hostname" ]; then
   [ -n "$hostname" ] || ask hostname "Computer name" "$(scutil --get ComputerName 2>/dev/null || true)"
 fi
 machine_env_set MACOS_PROFILE "$profile"
+# Add-ons are checked once the dotfiles repo is cloned (step 5).
+machine_env_set MACOS_ADDONS "$(printf '%s' "$addons" | tr -s ' \t' '  ' | sed 's/^ //; s/ $//')"
 machine_env_set MACOS_HOSTNAME "$hostname"
 machine_env_set MACOS_DOTFILES "$MACOS_DOTFILES"
-ok "profile: $profile, computer name: $hostname"
+ok "profile: $(profiles_label), computer name: $hostname"
 
 # --- 2. Prerequisites ---------------------------------------------------------
 step "Prerequisites"
@@ -99,6 +104,13 @@ fi
 if [ "$profile" != base ] && ! dry_run && [ ! -d "$MACOS_DOTFILES/macos/profiles/$profile" ]; then
   die "profile '$profile' not found in $MACOS_DOTFILES/macos/profiles"
 fi
+for _a in $(machine_addons); do
+  if is_main_profile "$_a"; then
+    die "'$_a' is a main profile, not an add-on"
+  elif ! dry_run && ! profile_exists "$_a"; then
+    die "add-on '$_a' not found in $MACOS_DOTFILES/macos/profiles"
+  fi
+done
 
 # --- 6. Apps ------------------------------------------------------------------
 step "Apps"

@@ -1,0 +1,111 @@
+#!/usr/bin/env bash
+# macos:summary=List, add or remove optional add-on profiles (e.g. gaming)
+# macos:usage=macos addons [list] | add <name>... | remove <name>... [--dry-run] [--yes]
+#
+#   list            the add-ons in the dotfiles repo, and which this Mac uses
+#   add <name>      turn an add-on on for this Mac, then run `macos apply`
+#   remove <name>   turn it off and unlink the Stow packages only it listed;
+#                   its apps stay installed until `macos apply --prune`,
+#                   which lists them and asks first
+#
+# An add-on is any directory under macos/profiles/ other than base, work and
+# personal. It holds the same files as a profile (Brewfile, defaults.conf,
+# system.conf, stow.list, ...) and is layered after this Mac's profile. The
+# choice is per Mac, kept in machine.env (MACOS_ADDONS).
+
+# shellcheck source=lib/common.sh
+. "${MACOS_ROOT:=$(cd -- "$(dirname -- "$0")/.." && pwd -P)}/lib/common.sh"
+for _lib in run profile dotfiles; do
+  # shellcheck source=/dev/null
+  . "$MACOS_ROOT/lib/$_lib.sh"
+done
+unset _lib
+
+action="${1:-list}"
+[ $# -gt 0 ] && shift
+names=""
+passthrough=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -n | --dry-run) MACOS_DRY_RUN=1; passthrough="$passthrough --dry-run" ;;
+    -y | --yes) MACOS_YES=1; passthrough="$passthrough --yes" ;;
+    -*) die "unknown option: $1 (see 'macos addons --help')" ;;
+    *) names="$names $1" ;;
+  esac
+  shift
+done
+export MACOS_DRY_RUN MACOS_YES
+
+[ -n "${MACOS_PROFILE:-}" ] || die "no profile set for this Mac; run 'macos bootstrap' first"
+
+# enabled <name>
+enabled() { machine_addons | grep -qx -- "$1"; }
+
+# save <names...> — persist the add-on list, in the order given.
+save() {
+  local list
+  list="$(printf '%s\n' "$@" | sed '/^$/d' | tr '\n' ' ')"
+  machine_env_set MACOS_ADDONS "${list% }"
+}
+
+case "$action" in
+  list)
+    avail="$(available_addons)"
+    if [ -z "$avail" ]; then
+      say "No add-ons in $(profiles_dir) (any directory there other than $MAIN_PROFILES is one)."
+      exit 0
+    fi
+    for a in $avail; do
+      if enabled "$a"; then printf '  on   %s\n' "$a"; else printf '  off  %s\n' "$a"; fi
+    done
+    for a in $(machine_addons); do
+      profile_exists "$a" || printf '  on   %s  (missing from the dotfiles repo)\n' "$a"
+    done
+    ;;
+  add)
+    [ -n "$names" ] || die "usage: macos addons add <name>... (see 'macos addons list')"
+    list="$(machine_addons)"
+    for a in $names; do
+      is_main_profile "$a" && die "'$a' is a main profile, not an add-on"
+      profile_exists "$a" || die "no add-on '$a' in $(profiles_dir) (available: $(available_addons | tr '\n' ' '))"
+      if enabled "$a"; then
+        skip "add-on $a already on"
+      else
+        list="$list
+$a"
+      fi
+    done
+    # shellcheck disable=SC2086
+    save $list
+    ok "add-ons on this Mac: $(machine_addons | tr '\n' ' ')"
+    # shellcheck disable=SC2086
+    exec "$MACOS_ROOT/libexec/macos-apply" $passthrough
+    ;;
+  remove)
+    [ -n "$names" ] || die "usage: macos addons remove <name>..."
+    list=""
+    for a in $(machine_addons); do
+      case " $names " in
+        *" $a "*) ;;
+        *) list="$list $a" ;;
+      esac
+    done
+    for a in $names; do
+      enabled "$a" || skip "add-on $a was not on"
+    done
+    before="$(stow_packages)"
+    # shellcheck disable=SC2086
+    save $list
+    ok "add-ons on this Mac: $(machine_addons | tr '\n' ' ' | sed 's/^$/none/')"
+    # Packages no remaining profile or add-on lists are unlinked; apply only
+    # ever links.
+    dropped="$(grep -vxF -f <(stow_packages; echo /) <<<"$before" || true)"
+    if [ -n "$dropped" ]; then
+      # shellcheck disable=SC2086
+      stow_run --delete $dropped
+      ok "unlinked: $(echo $dropped)"
+    fi
+    say "Its apps stay installed. 'macos apply --prune' lists what no Brewfile declares any more and asks before removing it."
+    ;;
+  *) die "unknown action '$action' (list, add or remove)" ;;
+esac

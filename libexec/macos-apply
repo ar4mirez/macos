@@ -31,7 +31,7 @@ lock_acquire
 dry_run || log_to_file
 dry_run && say "Dry run: nothing will be changed."
 
-step "Apps ($MACOS_PROFILE profile)"
+step "Apps ($(profiles_label))"
 brew_env
 merge_active_brewfile
 

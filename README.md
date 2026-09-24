@@ -6,7 +6,7 @@ A small, declarative Bash engine that sets up and maintains my Macs. It covers:
 - **Dotfiles:** GNU Stow packages from a separate private repo.
 - **macOS settings:** declared `defaults`, Dock layout, Caps Lock, keyboard shortcuts to switch off, default browser and a Brave policy. Each write is read back to confirm it took effect.
 - **Identity:** the 1Password SSH agent, SSH commit signing, and per-org git identities.
-- **Profiles:** `base` plus one of `work` or `personal`.
+- **Profiles:** `base` plus one of `work` or `personal`, and any optional add-ons, such as `gaming`.
 
 > **Status: v0.1.** Every command works. A fresh-VM end-to-end run is still to do (see [Roadmap](#roadmap)).
 
@@ -16,7 +16,8 @@ This repo is only the **engine**. It holds no personal data. Everything personal
 
 ```
 ~/.dotfiles/
-  macos/profiles/{base,work,personal}/
+  macos/profiles/{base,work,personal}/   main profiles (a Mac has one)
+  macos/profiles/<add-on>/                optional add-ons, e.g. gaming (same files)
       Brewfile            apps for this profile
       defaults.conf       domain | key | type | value
       system.conf         capslock, browser, hotkeys_off (key = value)
@@ -68,6 +69,7 @@ macos bootstrap   First-run setup of a new Mac
 macos apply       Converge apps, dotfiles, runtimes, settings and identity (--prune, --dry-run)
 macos upgrade     Upgrade declared packages and runtimes; list macOS updates
 macos apps        add | remove | adopt apps in a profile Brewfile
+macos addons      list | add | remove optional add-on profiles (e.g. gaming)
 macos dotfiles    link | unlink | status
 macos defaults    apply | check
 macos identity    1Password SSH agent, git identities, commit signing
@@ -80,9 +82,23 @@ macos dev         status | link | unlink: run your development clones on this Ma
 
 Every command that changes something supports `--dry-run`, takes a lock so two runs never overlap, and logs to `~/.local/state/macos/logs/`.
 
+## Add-on profiles
+
+An add-on is an optional layer on top of a Mac's profile. Any directory under `macos/profiles/` other than `base`, `work` and `personal` is one, and it holds the same files a profile does: a Brewfile, `defaults.conf`, `system.conf`, `stow.list` and so on.
+
+Each Mac chooses its own add-ons, which are saved in `machine.env` as `MACOS_ADDONS`. They're layered after the main profile, so an add-on's settings override the profile's.
+
+```sh
+macos addons                      # which add-ons exist, and which this Mac uses
+macos addons add gaming           # turn one on, then run `macos apply`
+macos addons remove gaming        # turn it off; `macos apply --prune` then offers to remove its apps
+macos apps add steam --cask --profile gaming   # declare an app in an add-on
+macos bootstrap --profile personal --addons gaming   # or choose them at bootstrap
+```
+
 ## Managing apps
 
-The profile Brewfiles in the dotfiles repo are the source of truth. This Mac uses `base` plus the profile saved in `machine.env`.
+The profile Brewfiles in the dotfiles repo are the source of truth. This Mac uses `base`, the profile saved in `machine.env`, and its add-ons.
 
 ```sh
 macos apps add spotify --cask            # declare in this Mac's profile + install

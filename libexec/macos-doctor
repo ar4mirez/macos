@@ -50,6 +50,9 @@ if [ -z "${MACOS_PROFILE:-}" ] || [ ! -d "$(profiles_dir)/base" ]; then
   exit 1
 fi
 good "profile $MACOS_PROFILE, dotfiles at $MACOS_DOTFILES"
+for _a in $(machine_addons); do
+  if profile_exists "$_a"; then good "add-on $_a"; else bad "add-on $_a is on but missing from the dotfiles repo ('macos addons remove $_a')"; fi
+done
 
 section "Security"
 if fdesetup status 2>/dev/null | grep -q 'FileVault is On'; then good "FileVault on"; else bad "FileVault is off"; fi

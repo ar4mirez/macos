@@ -6,7 +6,8 @@ This page records the decisions behind the engine and why each was made.
 The engine (this repo, public) holds no personal data. Brewfiles, `defaults.conf`, the Dock layout and org identities all live in the private dotfiles repo, under `macos/`. That way `macos update` can always fast-forward the engine, and your work app list is never published.
 
 ## Apps: the Brewfiles are the truth
-- `profiles/base/Brewfile` and `profiles/<profile>/Brewfile` are concatenated into `~/.local/state/macos/Brewfile`, because `brew bundle --file` takes only one file.
+- `profiles/base/Brewfile`, `profiles/<profile>/Brewfile` and each add-on's Brewfile are concatenated into `~/.local/state/macos/Brewfile`, because `brew bundle --file` takes only one file.
+- Add-ons (`MACOS_ADDONS`) are profiles too: `active_profiles` lists base, the profile, then the add-ons, and every per-profile file is read in that order. A Mac has one main profile (`MAIN_PROFILES` in `lib/profile.sh`); any other directory is an add-on.
 - `apply` runs `brew bundle install --no-upgrade`, so a second run changes nothing. Upgrades are a separate step, `macos upgrade`.
 - `apply --prune` removes every brew formula, cask or tap that no Brewfile lists. It always does a dry run first, shows the diff, and asks before `--force`. Pruning has limits:
   - It never touches Mac App Store apps, VS Code extensions, or npm/uv/cargo/go tools; those cleaners are turned off with `HOMEBREW_BUNDLE_CLEANUP_NO_*=1`.

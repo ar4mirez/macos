@@ -31,8 +31,10 @@ fi
 # command at a development clone instead; this stays the installed copy.
 : "${MACOS_INSTALL_DIR:=$HOME/.local/share/macos}"
 : "${MACOS_PROFILE:=}"
+# Optional add-on profiles (e.g. "gaming"), space-separated; see lib/profile.sh.
+: "${MACOS_ADDONS:=}"
 
-export MACOS_STATE MACOS_MACHINE_ENV MACOS_DOTFILES MACOS_PROFILE MACOS_INSTALL_DIR
+export MACOS_STATE MACOS_MACHINE_ENV MACOS_DOTFILES MACOS_PROFILE MACOS_ADDONS MACOS_INSTALL_DIR
 
 # machine_env_set <KEY> <value> — persist a MACOS_* setting for this machine,
 # keeping the other keys. Needs lib/run.sh (dry-run) at call time.

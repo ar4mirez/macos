@@ -27,7 +27,7 @@ export NO_COLOR=1
 # The user's shell exports XDG_* (and maybe GIT_CONFIG_*): real tools in the
 # tests (git, stow) must only ever see the sandbox HOME.
 unset XDG_STATE_HOME XDG_CONFIG_HOME XDG_DATA_HOME XDG_CACHE_HOME GIT_CONFIG_GLOBAL GIT_CONFIG_SYSTEM
-unset MACOS_PROFILE MACOS_BASH
+unset MACOS_PROFILE MACOS_ADDONS MACOS_BASH
 export GIT_CONFIG_NOSYSTEM=1
 mkdir -p "$HOME" "$SANDBOX/bin" "$SANDBOX/tmp"
 
@@ -722,6 +722,111 @@ t_prune_error() {
 check "prune stops on a cleanup error instead of guessing" t_prune_error
 
 # ---------------------------------------------------------------------------
+section "add-ons"
+
+addons_env() {
+  phase3_env
+  mkdir -p "$MACOS_DOTFILES/macos/profiles/gaming"
+  printf 'cask "steam"\n' >"$MACOS_DOTFILES/macos/profiles/gaming/Brewfile"
+  printf 'com.apple.dock | autohide | bool | false\n' >"$MACOS_DOTFILES/macos/profiles/gaming/defaults.conf"
+}
+
+t_addons_list() {
+  addons_env
+  "$M" addons >"$SANDBOX/o" 2>&1 || { cat "$SANDBOX/o"; return 1; }
+  grep -qx '  off  gaming' "$SANDBOX/o" && ! grep -qE ' (work|personal|base)$' "$SANDBOX/o"
+}
+check "addons lists the non-main profile directories, off by default" t_addons_list
+
+t_addons_add() {
+  addons_env
+  STUB_BREW_BUNDLE_CHECK_RC=1 "$M" addons add gaming >"$SANDBOX/o" 2>&1 || { cat "$SANDBOX/o"; return 1; }
+  grep -qx 'MACOS_ADDONS="gaming"' "$MACOS_STATE/machine.env" && grep -qx 'MACOS_PROFILE="work"' "$MACOS_STATE/machine.env" &&
+    grep -qx 'cask "steam"' "$MACOS_STATE/Brewfile" && grep -qx 'cask "slack"' "$MACOS_STATE/Brewfile" &&
+    grep -q "^brew bundle install --file=$MACOS_STATE/Brewfile --no-upgrade" "$STUB_LOG" &&
+    grep -q '==> Apps (work + gaming)' "$SANDBOX/o" || { cat "$SANDBOX/o"; return 1; }
+  "$M" addons >"$SANDBOX/o" 2>&1 && grep -qx '  on   gaming' "$SANDBOX/o"
+}
+check "addons add records the add-on and applies: its Brewfile joins the merge" t_addons_add
+
+t_addons_layers_settings() {
+  addons_env
+  printf 'com.apple.dock | autohide | bool | true\n' >"$MACOS_DOTFILES/macos/profiles/work/defaults.conf"
+  printf 'MACOS_ADDONS="gaming"\n' >>"$MACOS_STATE/machine.env"
+  rm -f "$STUB_DEFAULTS_DB" && : >"$STUB_DEFAULTS_DB"
+  "$M" defaults apply >"$SANDBOX/o" 2>&1 || { cat "$SANDBOX/o"; return 1; }
+  # The add-on comes after the profile, so its value wins.
+  grep -q '^defaults write com.apple.dock autohide -bool false$' "$STUB_LOG" && ! grep -q 'autohide -bool true' "$STUB_LOG"
+}
+check "an add-on's settings are layered after the main profile's" t_addons_layers_settings
+
+t_addons_add_invalid() {
+  addons_env
+  "$M" addons add nope >"$SANDBOX/o" 2>&1 && return 1
+  grep -q "no add-on 'nope'" "$SANDBOX/o" || return 1
+  "$M" addons add personal >"$SANDBOX/o" 2>&1 && return 1
+  grep -q "'personal' is a main profile" "$SANDBOX/o" && ! grep -q MACOS_ADDONS "$MACOS_STATE/machine.env" && ! grep -q 'bundle install' "$STUB_LOG"
+}
+check "addons add refuses unknown names and main profiles, changing nothing" t_addons_add_invalid
+
+t_addons_remove() {
+  addons_env
+  printf 'MACOS_ADDONS="gaming"\n' >>"$MACOS_STATE/machine.env"
+  "$M" addons remove gaming >"$SANDBOX/o" 2>&1 || { cat "$SANDBOX/o"; return 1; }
+  grep -qx 'MACOS_ADDONS=""' "$MACOS_STATE/machine.env" && grep -q 'apply --prune' "$SANDBOX/o" && ! grep -q 'brew uninstall' "$STUB_LOG" || { cat "$SANDBOX/o"; return 1; }
+  "$M" apply >/dev/null 2>&1
+  ! grep -q 'steam' "$MACOS_STATE/Brewfile"
+}
+check "addons remove turns it off without uninstalling; the next merge drops its apps" t_addons_remove
+
+t_addons_stow() {
+  addons_env
+  rm -rf "$HOME" && mkdir -p "$HOME"
+  mkdir -p "$MACOS_DOTFILES/shell/.config/shell" "$MACOS_DOTFILES/games/.config/games"
+  echo base >"$MACOS_DOTFILES/shell/.config/shell/rc"
+  echo games >"$MACOS_DOTFILES/games/.config/games/rc"
+  printf 'shell\n' >"$MACOS_DOTFILES/macos/profiles/base/stow.list"
+  printf 'games\n' >"$MACOS_DOTFILES/macos/profiles/gaming/stow.list"
+  "$M" addons add gaming >"$SANDBOX/o" 2>&1 || { cat "$SANDBOX/o"; return 1; }
+  [ -L "$HOME/.config/games/rc" ] && [ -L "$HOME/.config/shell/rc" ] || { cat "$SANDBOX/o"; return 1; }
+  "$M" addons remove gaming >"$SANDBOX/o" 2>&1 || { cat "$SANDBOX/o"; return 1; }
+  [ ! -e "$HOME/.config/games/rc" ] && [ -L "$HOME/.config/shell/rc" ] && grep -q 'unlinked: games' "$SANDBOX/o" || { cat "$SANDBOX/o"; return 1; }
+  # A second remove has nothing left to unlink.
+  "$M" addons remove gaming >"$SANDBOX/o" 2>&1 && ! grep -q unlinked "$SANDBOX/o"
+}
+check "an add-on's own Stow packages are linked by add and unlinked by remove" t_addons_stow
+
+t_addons_missing() {
+  addons_env
+  printf 'MACOS_ADDONS="retro"\n' >>"$MACOS_STATE/machine.env"
+  "$M" apply >"$SANDBOX/o" 2>&1 && return 1
+  grep -q "add-on 'retro' is enabled on this Mac but" "$SANDBOX/o" || return 1
+  "$M" doctor >"$SANDBOX/o" 2>&1
+  grep -q "add-on retro is on but missing" "$SANDBOX/o"
+}
+check "an enabled add-on missing from the repo stops apply and fails doctor" t_addons_missing
+
+t_addons_dry_run() {
+  addons_env
+  "$M" addons add gaming --dry-run >"$SANDBOX/o" 2>&1 || { cat "$SANDBOX/o"; return 1; }
+  ! grep -q MACOS_ADDONS "$MACOS_STATE/machine.env" && ! grep -q 'bundle install' "$STUB_LOG"
+}
+check "addons add --dry-run records and installs nothing" t_addons_dry_run
+
+t_bootstrap_addons() {
+  bootstrap_env
+  mkdir -p "$MACOS_DOTFILES/macos/profiles/gaming"
+  printf 'cask "steam"\n' >"$MACOS_DOTFILES/macos/profiles/gaming/Brewfile"
+  STUB_TAILSCALE_CLI_RC=1 STUB_BREW_BUNDLE_CHECK_RC=1 STUB_GH_OUT="  - Token scopes: 'admin:public_key', 'admin:ssh_signing_key', 'repo'" \
+    "$M" bootstrap --yes --profile work --addons gaming --hostname x >"$SANDBOX/o" 2>&1 || { cat "$SANDBOX/o"; return 1; }
+  grep -qx 'MACOS_ADDONS="gaming"' "$MACOS_STATE/machine.env" && grep -qx 'cask "steam"' "$MACOS_STATE/Brewfile" || { cat "$SANDBOX/o"; return 1; }
+  bootstrap_env
+  "$M" bootstrap --yes --profile work --addons personal --hostname x >"$SANDBOX/o" 2>&1 && return 1
+  grep -q "'personal' is a main profile" "$SANDBOX/o"
+}
+check "bootstrap --addons records add-ons, merges their Brewfiles, and refuses main profiles" t_bootstrap_addons
+
+# ---------------------------------------------------------------------------
 section "upgrade"
 
 t_upgrade() {
@@ -783,7 +888,7 @@ t_add_other_profile() {
   phase3_env; mkdir -p "$MACOS_DOTFILES/macos/profiles/personal"
   "$M" apps add spotify --cask --profile personal >"$SANDBOX/o" 2>&1 || { cat "$SANDBOX/o"; return 1; }
   grep -q "^brew bundle add --file=$MACOS_DOTFILES/macos/profiles/personal/Brewfile --cask spotify" "$STUB_LOG" &&
-    grep -q "not this Mac's profile" "$SANDBOX/o" && ! grep -q '^brew install' "$STUB_LOG"
+    grep -q "this Mac doesn't use personal (it uses work)" "$SANDBOX/o" && ! grep -q '^brew install' "$STUB_LOG"
 }
 check "apps add to another profile declares without installing here" t_add_other_profile
 

@@ -38,7 +38,7 @@ case "$action" in
     lock_acquire
     dry_run || log_to_file
     dry_run && say "Dry run: nothing will be changed."
-    step "Defaults ($MACOS_PROFILE profile)"
+    step "Defaults ($(profiles_label))"
     defaults_apply
     step "System settings"
     system_apply

@@ -50,13 +50,18 @@ brew_merge() {
   } >"$out"
 }
 
-# profile_brewfiles <profile> — base plus the profile's Brewfile, if any.
+# profile_brewfiles <profile> — base, the profile's Brewfile and those of
+# this Mac's add-ons, where they exist.
 profile_brewfiles() {
-  local dir="$MACOS_DOTFILES/macos/profiles"
+  local dir="$MACOS_DOTFILES/macos/profiles" a
   printf '%s\n' "$dir/base/Brewfile"
   if [ "$1" != base ] && [ -f "$dir/$1/Brewfile" ]; then
     printf '%s\n' "$dir/$1/Brewfile"
   fi
+  for a in ${MACOS_ADDONS:-}; do
+    [ -f "$dir/$a/Brewfile" ] && printf '%s\n' "$dir/$a/Brewfile"
+  done
+  return 0
 }
 
 # merge_active_brewfile — regenerate the merged Brewfile for this machine's

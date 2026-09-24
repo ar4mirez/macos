@@ -126,7 +126,7 @@ apps_add() {
         ok "installed $name"
       fi
     else
-      skip "not installing: $profile is not this Mac's profile ($MACOS_PROFILE)"
+      skip "not installing: this Mac doesn't use $profile (it uses $(profiles_label))"
     fi
   fi
   commit_hint "Add $name to $profile"
