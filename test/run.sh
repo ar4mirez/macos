@@ -20,7 +20,11 @@ export MACOS_STATE="$SANDBOX/state"
 export MACOS_DOTFILES="$SANDBOX/dotfiles"
 export STUB_LOG="$SANDBOX/stub.log"
 export NO_COLOR=1
-unset XDG_STATE_HOME MACOS_PROFILE MACOS_BASH
+# The user's shell exports XDG_* (and maybe GIT_CONFIG_*): real tools in the
+# tests (git, stow) must only ever see the sandbox HOME.
+unset XDG_STATE_HOME XDG_CONFIG_HOME XDG_DATA_HOME XDG_CACHE_HOME GIT_CONFIG_GLOBAL GIT_CONFIG_SYSTEM
+unset MACOS_PROFILE MACOS_BASH
+export GIT_CONFIG_NOSYSTEM=1
 mkdir -p "$HOME" "$SANDBOX/bin"
 
 for t in $STUBBED_TOOLS; do
@@ -224,6 +228,14 @@ t_env_machine_env() {
   )
 }
 check "env.sh loads MACOS_* keys from machine.env" t_env_machine_env
+
+t_machine_env_literal() {
+  mkdir -p "$MACOS_STATE"
+  printf 'MACOS_HOSTNAME="a-b"\n' >"$MACOS_STATE/machine.env"
+  /bin/bash -c '. "$1/lib/common.sh"; . "$1/lib/run.sh"; machine_env_set MACOS_HOSTNAME a.b' _ "$ROOT" 2>/dev/null
+  grep -qxF 'MACOS_HOSTNAME="a.b"' "$MACOS_STATE/machine.env"
+}
+check "machine_env_set compares values literally (a.b is not a-b)" t_machine_env_literal
 
 t_env_precedence() {
   (
@@ -515,7 +527,7 @@ t_bootstrap_full() {
   grep -q '^tailscale|' "$MACOS_STATE/pending" || { echo "pending"; return 1; }
   ls "$MACOS_STATE"/logs/*macos-bootstrap.log >/dev/null || { echo "log"; return 1; }
 }
-check "bootstrap --yes runs phases 1–6 in order with the right commands" t_bootstrap_full
+check "bootstrap --yes runs the security, GitHub, clone and app phases with the right commands" t_bootstrap_full
 
 t_bootstrap_missing_scope() {
   bootstrap_env
@@ -750,6 +762,17 @@ t_remove_keep() {
 }
 check "apps remove --keep-installed only undeclares" t_remove_keep
 
+t_remove_tap_and_mas() {
+  phase3_env
+  printf 'tap "someone/tools"\nmas "Xcode", id: 497799835\n' >>"$W"
+  STUB_BREW_TAP_OUT="someone/tools" "$M" apps remove someone/tools --yes >"$SANDBOX/o" 2>&1 || { cat "$SANDBOX/o"; return 1; }
+  "$M" apps remove Xcode --yes >>"$SANDBOX/o" 2>&1 || { cat "$SANDBOX/o"; return 1; }
+  grep -q "^brew bundle remove --file=$W --tap someone/tools" "$STUB_LOG" && grep -q '^brew untap someone/tools' "$STUB_LOG" &&
+    grep -q "^brew bundle remove --file=$W --mas Xcode" "$STUB_LOG" && ! grep -q 'uninstall .*Xcode' "$STUB_LOG" &&
+    grep -q 'from Finder or Launchpad' "$SANDBOX/o" || { cat "$STUB_LOG"; return 1; }
+}
+check "apps remove handles taps (untap) and App Store entries (undeclare only)" t_remove_tap_and_mas
+
 DUMP_OUT="$(printf 'brew "git"\nbrew "htop"\ncask "slack"\ntap "someone/tools"')"
 
 t_adopt_strays() {
@@ -841,6 +864,16 @@ t_link_idempotent() {
 }
 check "link twice changes nothing and backs nothing up" t_link_idempotent
 
+t_apply_second_run_quiet() {
+  dotfiles_env
+  "$M" apply >/dev/null 2>&1; : >"$STUB_LOG"
+  "$M" apply >"$SANDBOX/o" 2>&1 || { cat "$SANDBOX/o"; return 1; }
+  # Only the final "apply finished" is an ok line: nothing else changed.
+  [ "$(grep -c '^ ok ' "$SANDBOX/o")" -eq 1 ] && grep -q '^ ok apply finished' "$SANDBOX/o" &&
+    ! grep -qE '^(stow|mise install)' "$STUB_LOG" && grep -q 'dotfiles already linked' "$SANDBOX/o" || { cat "$SANDBOX/o"; return 1; }
+}
+check "a second apply changes nothing and says so (only \"apply finished\")" t_apply_second_run_quiet
+
 t_link_dry_run() {
   dotfiles_env
   printf 'mine\n' >"$HOME/.zshrc"
@@ -871,6 +904,15 @@ t_unlink() {
 }
 check "unlink removes the links and leaves the repo alone" t_unlink
 
+t_link_folded_parent() {
+  dotfiles_env
+  # An older folded stow: ~/.config/zsh is itself a link into the repo.
+  mkdir -p "$HOME/.config" && ln -s "$MACOS_DOTFILES/zsh/.config/zsh" "$HOME/.config/zsh"
+  "$M" dotfiles link >"$SANDBOX/o" 2>&1
+  [ -f "$MACOS_DOTFILES/zsh/.config/zsh/a.zsh" ] && [ ! -d "$MACOS_STATE/backup" ] || { cat "$SANDBOX/o"; ls -R "$MACOS_STATE" 2>/dev/null; return 1; }
+}
+check "link never moves the repo's own files when a parent dir is a folded link" t_link_folded_parent
+
 t_link_missing_package() {
   dotfiles_env
   printf 'nosuchpkg\n' >>"$MACOS_DOTFILES/macos/profiles/work/stow.list"
@@ -881,7 +923,7 @@ check "link refuses a stow.list entry with no package, before linking anything" 
 
 t_apply_links_and_installs_runtimes() {
   dotfiles_env
-  STUB_GH_OUT="gho_SECRETTOKEN123" "$M" apply >"$SANDBOX/o" 2>&1 || { cat "$SANDBOX/o"; return 1; }
+  STUB_MISE_LS_OUT="node lts (missing)" STUB_GH_OUT="gho_SECRETTOKEN123" "$M" apply >"$SANDBOX/o" 2>&1 || { cat "$SANDBOX/o"; return 1; }
   is_link_into_repo .zshrc zsh && grep -q '^mise install --yes$' "$STUB_LOG" &&
     ! grep -rq SECRETTOKEN "$SANDBOX/o" "$STUB_LOG" "$MACOS_STATE/logs"
 }
@@ -1244,6 +1286,38 @@ t_identity_known_hosts() {
 }
 check "identity pins GitHub's host keys from its API, once" t_identity_known_hosts
 
+t_identity_default_order() {
+  identity_env; agent_up
+  # default listed AFTER the org must not override the org's includeIf.
+  { grep -v '^default' "$MACOS_DOTFILES/macos/orgs.conf"; grep '^default' "$MACOS_DOTFILES/macos/orgs.conf"; } >"$SANDBOX/orgs" &&
+    mv "$SANDBOX/orgs" "$MACOS_DOTFILES/macos/orgs.conf"
+  STUB_GH_API_USER_OUT=ar4mirez "$M" identity --yes >/dev/null 2>&1
+  printf '[include]\n\tpath = ~/.config/git/identity.gitconfig\n' >"$HOME/.config/git/config"
+  mkdir -p "$HOME/Work/Cuemby/app"
+  local g="env -u XDG_CONFIG_HOME -u GIT_CONFIG_GLOBAL /usr/bin/git"
+  $g -C "$HOME/Work/Cuemby/app" init -q
+  [ "$($g -C "$HOME/Work/Cuemby/app" config user.email)" = angel@cuemby.com ]
+}
+check "the org identity wins even when default comes later in orgs.conf" t_identity_default_order
+
+t_identity_keeps_verified_setup() {
+  identity_env; agent_up
+  STUB_GH_API_USER_OUT=ar4mirez "$M" identity --yes >/dev/null 2>&1
+  cp "$IG" "$SANDBOX/ig.before"
+  agent_down
+  "$M" apply </dev/null >"$SANDBOX/o" 2>&1 || { cat "$SANDBOX/o"; return 1; }
+  cmp -s "$IG" "$SANDBOX/ig.before" && grep -q 'gpgsign = true' "$IG" && grep -q 'keeping the verified identity setup' "$SANDBOX/o"
+}
+check "apply with 1Password closed keeps a verified signing setup" t_identity_keeps_verified_setup
+
+t_identity_no_alias_without_key() {
+  identity_env; agent_up
+  sed -i '' "s#| angel@cuemby.com | ar4mirez | $KEY_WORK |#| angel@cuemby.com | angel-cuemby | agent:Missing |#" "$MACOS_DOTFILES/macos/orgs.conf"
+  STUB_GH_API_USER_OUT=ar4mirez "$M" identity --yes >"$SANDBOX/o" 2>&1 || { cat "$SANDBOX/o"; return 1; }
+  ! grep -q insteadOf "$HOME/.config/git/identity.d/cuemby.gitconfig" && ! grep -q 'github.com-cuemby' "$HOME/.ssh/config.d/macos-identity"
+}
+check "no url rewrite for a second account whose key is unresolved (no alias exists)" t_identity_no_alias_without_key
+
 t_apply_never_waits_for_agent() {
   identity_env; agent_down
   "$M" apply </dev/null >"$SANDBOX/o" 2>&1 || { cat "$SANDBOX/o"; return 1; }
@@ -1283,14 +1357,51 @@ t_migration_failure_stops() {
 }
 check "a failing migration stops before later ones and stays pending" t_migration_failure_stops
 
-t_update_pulls() {
+# Real git against local bare remotes, run from a copy of the engine so the
+# real clone is never fetched or merged.
+REALGIT="$SANDBOX/realgit"
+mkdir -p "$REALGIT" && ln -sf /usr/bin/git "$REALGIT/git"
+G() { /usr/bin/git -c user.email=t@t -c user.name=t -c commit.gpgsign=false "$@"; }
+
+update_realgit_env() {
   migrations_env
-  STUB_GIT_OUT="abc1234 an incoming commit" "$M" update --yes >"$SANDBOX/o" 2>&1 || { cat "$SANDBOX/o"; return 1; }
-  grep -q "^git -c credential.helper= -C $ROOT merge --ff-only --quiet @{u}" "$STUB_LOG" &&
-    grep -q "^git -c credential.helper= -c credential.helper=!gh auth git-credential -C $MACOS_DOTFILES rebase --autostash --quiet @{u}" "$STUB_LOG" ||
-    { cat "$STUB_LOG"; return 1; }
+  local eng="$SANDBOX/eng"
+  rm -rf "$eng" "$SANDBOX/eng.git" "$SANDBOX/dot.git" "$SANDBOX/dot-other"
+  cp -R "$ROOT" "$eng" && ENG="$(cd "$eng" && pwd -P)"
+  G clone -q --bare "$ENG" "$SANDBOX/eng.git"
+  G -C "$ENG" remote set-url origin "$SANDBOX/eng.git" && G -C "$ENG" fetch -q
+  G -C "$ENG" branch -q -u origin/main main 2>/dev/null || G -C "$ENG" branch -q -u "origin/$(G -C "$ENG" branch --show-current)"
+  # dotfiles: a real repo with an upstream
+  rm -rf "$MACOS_DOTFILES/.git"
+  printf 'one\n' >"$MACOS_DOTFILES/notes.txt"
+  G init -q -b main "$MACOS_DOTFILES" && G -C "$MACOS_DOTFILES" add -A && G -C "$MACOS_DOTFILES" commit -qm base
+  G init -q --bare -b main "$SANDBOX/dot.git"
+  G -C "$MACOS_DOTFILES" remote add origin "$SANDBOX/dot.git" && G -C "$MACOS_DOTFILES" push -q -u origin main 2>/dev/null
+  G clone -q "$SANDBOX/dot.git" "$SANDBOX/dot-other"
+  printf 'upstream\n' >"$SANDBOX/dot-other/notes.txt"
+  G -C "$SANDBOX/dot-other" commit -qam upstream && G -C "$SANDBOX/dot-other" push -q
 }
-check "update fast-forwards the engine and rebases dotfiles with autostash" t_update_pulls
+
+t_update_rebases_dotfiles() {
+  update_realgit_env
+  printf 'mine\n' >"$MACOS_DOTFILES/local-only.txt"
+  G -C "$MACOS_DOTFILES" add local-only.txt   # an uncommitted, non-conflicting edit
+  PATH="$REALGIT:$PATH" "$ENG/bin/macos" update --yes >"$SANDBOX/o" 2>&1 || { cat "$SANDBOX/o"; return 1; }
+  [ "$(cat "$MACOS_DOTFILES/notes.txt")" = upstream ] && [ "$(cat "$MACOS_DOTFILES/local-only.txt")" = mine ] &&
+    grep -q 'apply finished' "$SANDBOX/o"
+}
+check "update pulls dotfiles (real git) keeping uncommitted edits, then applies" t_update_rebases_dotfiles
+
+t_update_autostash_conflict() {
+  update_realgit_env
+  printf 'local edit\n' >"$MACOS_DOTFILES/notes.txt"   # conflicts with upstream
+  PATH="$REALGIT:$PATH" "$ENG/bin/macos" update --yes >"$SANDBOX/o" 2>&1 && { cat "$SANDBOX/o"; return 1; }
+  grep -q 'saved in the stash' "$SANDBOX/o" && ! grep -q 'apply finished' "$SANDBOX/o" &&
+    [ "$(cat "$MACOS_DOTFILES/notes.txt")" = upstream ] && ! grep -q '<<<<<<<' "$MACOS_DOTFILES/notes.txt" &&
+    [ "$(G -C "$MACOS_DOTFILES" stash list | wc -l | tr -d ' ')" -eq 1 ] &&
+    G -C "$MACOS_DOTFILES" stash show -p | grep -q '+local edit' || { cat "$SANDBOX/o"; return 1; }
+}
+check "update stops on an autostash conflict: no markers left, edits kept in the stash, nothing applied" t_update_autostash_conflict
 
 t_update_dry_run() {
   migrations_env
@@ -1310,6 +1421,32 @@ t_bootstrap_marks_migrations() {
 }
 check "a fresh bootstrap marks migrations done without running them" t_bootstrap_marks_migrations
 
+t_bootstrap_rerun_runs_migrations() {
+  bootstrap_env
+  rm -rf "$MACOS_MIGRATIONS_DIR" && mkdir -p "$MACOS_MIGRATIONS_DIR" && printf 'touch "%s/ran"\n' "$SANDBOX" >"$MACOS_MIGRATIONS_DIR/100.sh"
+  rm -f "$SANDBOX/ran"
+  mkdir -p "$MACOS_STATE" && printf 'MACOS_PROFILE="work"\n' >"$MACOS_STATE/machine.env"   # set up before: not fresh
+  STUB_GH_OUT="  - Token scopes: 'admin:public_key', 'admin:ssh_signing_key'" \
+    "$M" bootstrap --yes --profile work --hostname x >"$SANDBOX/o" 2>&1 || { cat "$SANDBOX/o"; return 1; }
+  [ -f "$SANDBOX/ran" ] && [ -f "$MACOS_STATE/migrations/100" ]
+}
+check "re-running bootstrap on a set-up Mac runs pending migrations (not marks them)" t_bootstrap_rerun_runs_migrations
+
+t_bootstrap_unreadable_scopes() {
+  bootstrap_env
+  STUB_GH_OUT="" "$M" bootstrap --yes --profile work --hostname x >"$SANDBOX/o" 2>&1 || { cat "$SANDBOX/o"; return 1; }
+  grep -q "can't read gh token scopes" "$SANDBOX/o" && ! grep -q 'lacks scopes' "$SANDBOX/o"
+}
+check "a gh token with no readable scopes (fine-grained) warns instead of stopping" t_bootstrap_unreadable_scopes
+
+t_apply_continues_after_brew_failure() {
+  dotfiles_env
+  STUB_BREW_BUNDLE_CHECK_RC=1 STUB_BREW_BUNDLE_INSTALL_RC=1 "$M" apply >"$SANDBOX/o" 2>&1 && return 1
+  grep -q 'some apps failed to install' "$SANDBOX/o" && is_link_into_repo .zshrc zsh &&
+    grep -q '==> Defaults' "$SANDBOX/o" && grep -q 'apply finished with errors in: apps' "$SANDBOX/o"
+}
+check "a failed brew install still converges dotfiles and defaults, then exits non-zero" t_apply_continues_after_brew_failure
+
 # ---------------------------------------------------------------------------
 section "uninstall"
 
@@ -1319,12 +1456,19 @@ t_uninstall() {
   rm -rf "$copy" && cp -R "$ROOT" "$copy" && copy="$(cd "$copy" && pwd -P)"
   "$copy/bin/macos" dotfiles link >/dev/null 2>&1
   mkdir -p "$HOME/.local/bin" && ln -sfn "$copy/bin/macos" "$HOME/.local/bin/macos"
-  mkdir -p "$MACOS_STATE/backup/1" && echo keep >"$MACOS_STATE/backup/1/.zshrc"
+  mkdir -p "$MACOS_STATE/backup/20260101-000000" "$MACOS_STATE/backup/20260101-000000-retired-key/.ssh"
+  echo original >"$MACOS_STATE/backup/20260101-000000/.zshrc"
+  echo secret >"$MACOS_STATE/backup/20260101-000000-retired-key/.ssh/id_ed25519"
+  mkdir -p "$HOME/.config/git/identity.d" "$HOME/.ssh/config.d"
+  touch "$HOME/.config/git/identity.gitconfig" "$HOME/.config/git/identity.d/x.gitconfig" "$HOME/.ssh/config.d/macos-identity" "$HOME/.ssh/macos-default.pub"
   "$copy/bin/macos" uninstall --yes >"$SANDBOX/o" 2>&1 || { cat "$SANDBOX/o"; return 1; }
-  [ ! -e "$copy" ] && [ ! -e "$HOME/.zshrc" ] && [ ! -L "$HOME/.local/bin/macos" ] &&
-    [ -f "$MACOS_DOTFILES/zsh/.zshrc" ] && [ "$(cat "$MACOS_STATE/backup/1/.zshrc")" = keep ]
+  [ ! -e "$copy" ] && [ ! -L "$HOME/.local/bin/macos" ] && [ -f "$MACOS_DOTFILES/zsh/.zshrc" ] &&
+    [ ! -L "$HOME/.zshrc" ] && [ "$(cat "$HOME/.zshrc")" = original ] &&
+    [ ! -e "$HOME/.ssh/id_ed25519" ] &&
+    [ ! -e "$HOME/.config/git/identity.gitconfig" ] && [ ! -d "$HOME/.config/git/identity.d" ] &&
+    [ ! -e "$HOME/.ssh/config.d/macos-identity" ] && [ ! -e "$HOME/.ssh/macos-default.pub" ] || { cat "$SANDBOX/o"; ls -la "$HOME"; return 1; }
 }
-check "uninstall unlinks dotfiles, removes the engine, keeps backups and the repo" t_uninstall
+check "uninstall unlinks, restores the replaced files, removes generated identity files and the engine" t_uninstall
 
 t_uninstall_guard() {
   dotfiles_env
@@ -1392,6 +1536,48 @@ t_doctor_claude_code_cask() {
   grep -q 'claude-code cask is installed' "$SANDBOX/o"
 }
 check "doctor flags the claude-code cask shadowing the native install" t_doctor_claude_code_cask
+
+t_doctor_intel_scan() {
+  doctor_env
+  local A="$SANDBOX/Applications"
+  rm -rf "$A" && for n in Native Script Intel; do
+    mkdir -p "$A/$n.app/Contents/MacOS"
+    plutil -create xml1 "$A/$n.app/Contents/Info.plist" && plutil -insert CFBundleExecutable -string "$n" "$A/$n.app/Contents/Info.plist"
+    printf 'x\n' >"$A/$n.app/Contents/MacOS/$n"
+  done
+  # lipo stub: one answer per run; run doctor once per case.
+  ( MACOS_APPLICATIONS_DIRS="$A" STUB_LIPO_RC=1 "$M" doctor >"$SANDBOX/o1" 2>&1 )
+  ( MACOS_APPLICATIONS_DIRS="$A" STUB_LIPO_OUT="x86_64" "$M" doctor >"$SANDBOX/o2" 2>&1 )
+  grep -q 'every app runs natively' "$SANDBOX/o1" && grep -q 'Intel-only apps .*Native' "$SANDBOX/o2" || { cat "$SANDBOX/o1" "$SANDBOX/o2"; return 1; }
+}
+check "doctor's Intel-only scan ignores non-Mach-O launchers and flags x86-only binaries" t_doctor_intel_scan
+
+t_doctor_signing() {
+  doctor_env
+  identity_env; agent_up
+  STUB_GH_API_USER_OUT=ar4mirez "$M" identity --yes >/dev/null 2>&1
+  printf '[include]\n\tpath = ~/.config/git/identity.gitconfig\n' >"$HOME/.config/git/config"
+  ( PATH="$REALGIT:$PATH" "$M" doctor >"$SANDBOX/o" 2>&1 )
+  grep -q 'ok    commits are signed through 1Password' "$SANDBOX/o" || { cat "$SANDBOX/o"; return 1; }
+  export STUB_SSH_ADD_OUT="$KEY_WORK"   # the default signing key is gone from the agent
+  ( PATH="$REALGIT:$PATH" "$M" doctor >"$SANDBOX/o" 2>&1 ) && return 1
+  grep -q 'FAIL  commit signing is on but its key is not in the 1Password agent' "$SANDBOX/o"
+}
+check "doctor verifies commit signing: signer present and key in the agent" t_doctor_signing
+
+t_logs_private() {
+  dotfiles_env
+  "$M" apply >/dev/null 2>&1
+  [ "$(stat -f %Lp "$(ls "$MACOS_STATE"/logs/*apply.log | head -1)")" = 600 ] && [ "$(stat -f %Lp "$MACOS_STATE/logs")" = 700 ]
+}
+check "log files are private (0600 in a 0700 dir)" t_logs_private
+
+t_flags_without_action() {
+  defaults_env
+  "$M" defaults --dry-run >"$SANDBOX/o" 2>&1
+  ! grep -q 'unknown action' "$SANDBOX/o"
+}
+check "commands with a default action accept options alone (macos defaults --dry-run)" t_flags_without_action
 
 t_doctor_no_profile() {
   phase3_env; rm -f "$MACOS_STATE/machine.env"

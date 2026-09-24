@@ -58,7 +58,17 @@ else
   printf '%s\n' "$new" | sed 's/^/    /' >&2
   if ! run git "${GIT_GH_ONLY[@]}" -C "$MACOS_DOTFILES" rebase --autostash --quiet '@{u}'; then
     git -C "$MACOS_DOTFILES" rebase --abort >/dev/null 2>&1 || true
-    die "your local dotfiles changes conflict with the remote; resolve in $MACOS_DOTFILES (nothing was applied)"
+    die "your local dotfiles commits conflict with the remote; resolve in $MACOS_DOTFILES (nothing was applied)"
+  fi
+  # When re-applying the autostash conflicts, git still exits 0 and leaves
+  # conflict markers in live (symlinked) dotfiles. The edits are safe in the
+  # stash, so put the files back to the pulled version and stop.
+  if ! dry_run && [ -n "$(git -C "$MACOS_DOTFILES" ls-files -u)" ]; then
+    if [ -n "$(git -C "$MACOS_DOTFILES" stash list)" ]; then
+      git -C "$MACOS_DOTFILES" reset --hard --quiet HEAD
+      die "your uncommitted dotfiles edits conflict with what was pulled. They are saved in the stash; the files are back to the pulled version so your shell keeps working. Resolve with: git -C $MACOS_DOTFILES stash pop (fix conflicts, commit), then 'macos apply'. Nothing was applied."
+    fi
+    die "unresolved conflicts in $MACOS_DOTFILES; resolve them, then 'macos update' (nothing was applied)"
   fi
   ok "dotfiles updated"
 fi

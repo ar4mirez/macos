@@ -33,6 +33,12 @@ done
 export MACOS_YES MACOS_DRY_RUN
 
 sudo_preflight
+# A Mac is fresh when no earlier bootstrap saved its settings; only then are
+# migrations (fixes for older setups) skipped rather than run.
+fresh_install=0
+[ -f "$MACOS_MACHINE_ENV" ] || fresh_install=1
+failed=""
+
 lock_acquire
 dry_run || log_to_file
 dry_run && say "Dry run: nothing will be changed (running under bash $BASH_VERSION)."
@@ -96,10 +102,13 @@ if dry_run && [ ! -d "$MACOS_DOTFILES/macos/profiles/base" ]; then
 else
   merge_active_brewfile
   ok "merged Brewfile: $MERGED_BREWFILE"
-  brew_bundle_install "$MERGED_BREWFILE"
+  if ! brew_bundle_install "$MERGED_BREWFILE"; then
+    warn "some apps failed to install (see above); continuing with the rest of the setup"
+    failed="$failed apps"
+  fi
   # pam-reattach may have just been installed; re-render sudo_local for it.
   security_touchid
-  if grep -q '^cask "tailscale-app"' "$MERGED_BREWFILE"; then
+  if grep -q '^cask "tailscale-app"' "$MERGED_BREWFILE" && ! "$TAILSCALE_CLI" status >/dev/null 2>&1; then
     pending_add tailscale "Open Tailscale, approve its system extension (System Settings → Privacy & Security) and log in"
   fi
   if grep -q '^mas ' "$MERGED_BREWFILE"; then
@@ -138,10 +147,10 @@ fi
 
 # --- 10. Migrations and a health check --------------------------------------------
 step "Migrations"
-if [ -d "$MIGRATIONS_STATE" ]; then
-  migrations_run
-else
+if [ "$fresh_install" = 1 ]; then
   migrations_mark_all
+else
+  migrations_run
 fi
 
 step "Health check"
@@ -151,4 +160,7 @@ else
   "$MACOS_ROOT/bin/macos" doctor || warn "'macos doctor' found problems (see above)"
 fi
 say "Open a new terminal window (or run: exec zsh -l) to load the linked shell config."
+if [ -n "$failed" ]; then
+  die "bootstrap finished with errors in:$failed; fix them and re-run 'macos bootstrap' (it resumes)"
+fi
 ok "bootstrap finished"

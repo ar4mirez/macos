@@ -23,7 +23,7 @@ The engine (this repo, public) holds no personal data. Brewfiles, `defaults.conf
 ## Defaults
 - `defaults.conf` has one line per setting: `domain | key | type | value`. The domain can be `-g` or `@currentHost:<domain>`.
 - Each write is read back, with bools normalised, to confirm it took effect. `defaults check` reports drift and writes nothing.
-- Settings that aren't a single key (Dock layout, Caps Lock, default browser) are named imperative steps.
+- Settings that aren't a single key (Dock layout, Caps Lock, default browser, the Brave policy profile) are named imperative steps, configured by `dock.conf`, `system.conf` and `brave.mobileconfig`.
 
 ## Bootstrap constraints
 - **No stdin:** under `curl | bash`, stdin is the pipe, so prompts read from `/dev/tty`. `MACOS_PROFILE=… MACOS_YES=1` runs the whole thing without prompts.
@@ -32,7 +32,9 @@ The engine (this repo, public) holds no personal data. Brewfiles, `defaults.conf
   - `git -c credential.helper=` must come before `-c credential.helper='!gh auth git-credential'`. The empty value clears the Command Line Tools' system `osxkeychain` helper. Otherwise that helper answers first with whatever token it cached earlier and keeps a copy of every new one. After `gh auth refresh`, that cached token is stale, and pushes fail even though `gh` holds the right scopes.
   - The same reset is persisted in each clone's `.git/config`.
 - **Manual GUI steps:** some steps can't be scripted: 1Password sign-in and turning on its SSH agent, Tailscale's system-extension approval, App Store sign-in, and approving configuration profiles. They are recorded in `~/.local/state/macos/pending` and shown by `doctor` as warnings.
-- **Signing last:** commit signing is enabled only after the 1Password agent is confirmed working.
+- **Signing waits for the agent:** commit signing is turned on only once the 1Password agent answers, and only for keys it actually holds. Once verified, later runs keep the setup even while 1Password is closed.
+- **Pipefail:** under `set -o pipefail`, `cmd | grep -q` fails whenever `cmd` exits non-zero, even when `grep` matches. `ls` of a blocked folder and `ssh -T` to GitHub both exit non-zero by design, so such checks use `{ cmd || true; } | grep -q`.
+- **Autostash conflicts:** `git rebase --autostash` exits 0 even when re-applying the stash conflicts. `update` detects the unmerged state, resets to the pulled version (the edits stay in the stash), and stops before applying.
 
 ## Testing
 `defaults` ignores `$HOME`, because cfprefsd looks up the real user. So tests isolate themselves by putting stubs for every system tool first on `PATH`, not by redirecting `HOME`. CI runs lint and unit tests. End-to-end runs happen in a macOS VM.

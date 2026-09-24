@@ -20,7 +20,9 @@ stow_packages() {
   # only once `macos identity` has verified it.
   if [ -f "$MACOS_STATE/identity.verified" ] || [ "${IDENTITY_READY:-}" = 1 ]; then
     for p in $IDENTITY_PACKAGES; do
-      [ -d "$MACOS_DOTFILES/$p" ] && echo "$p"
+      if [ -d "$MACOS_DOTFILES/$p" ]; then
+        echo "$p"
+      fi
     done
   fi
 }
@@ -35,7 +37,11 @@ package_files() {
 # link_state <package> <relpath> — linked | missing | conflict
 link_state() {
   local target="$HOME/$2" want="$MACOS_DOTFILES/$1/$2"
-  if [ -L "$target" ]; then
+  # Resolving catches a parent directory that is itself a link into the
+  # repo (a folded stow): the file is the repo's own, never a conflict.
+  if [ -e "$target" ] && [ ! -L "$target" ] && [ "$(readlink -f "$target")" = "$(readlink -f "$want")" ]; then
+    echo linked
+  elif [ -L "$target" ]; then
     if [ "$(readlink -f "$target" 2>/dev/null)" = "$(readlink -f "$want")" ]; then
       echo linked
     else
@@ -84,8 +90,46 @@ EOF
   fi
 }
 
+# dotfiles_restore_backups — put back files the dotfiles once replaced, from
+# the oldest engine backup that has them, where nothing is there now.
+# Only engine-made backup dirs (<yyyymmdd-hhmmss>) are used, so files you
+# moved aside yourself (e.g. a retired key) stay put.
+dotfiles_restore_backups() {
+  local dir rel restored=0
+  [ -d "$MACOS_STATE/backup" ] || return 0
+  for dir in $(find "$MACOS_STATE/backup" -mindepth 1 -maxdepth 1 -type d | grep -E '/[0-9]{8}-[0-9]{6}$' | sort); do
+    while IFS= read -r rel; do
+      [ -n "$rel" ] || continue
+      if [ -e "$HOME/$rel" ] || [ -L "$HOME/$rel" ]; then
+        continue
+      fi
+      run mkdir -p "$(dirname "$HOME/$rel")"
+      run cp -Pp "$dir/$rel" "$HOME/$rel"
+      restored=$((restored + 1))
+    done <<EOF
+$(cd "$dir" && find . \( -type f -o -type l \) | sed 's#^\./##')
+EOF
+  done
+  if [ "$restored" -gt 0 ]; then
+    ok "restored $restored file(s) the dotfiles had replaced"
+  fi
+}
+
 stow_run() { # stow_run <stow flags...> -- <packages...>
   run stow --no-folding --ignore="$STOW_IGNORE" -d "$MACOS_DOTFILES" -t "$HOME" "$@"
+}
+
+# dotfiles_all_linked <package>... — every file of every package is linked.
+dotfiles_all_linked() {
+  local p rel
+  for p in "$@"; do
+    while IFS= read -r rel; do
+      [ -n "$rel" ] || continue
+      [ "$(link_state "$p" "$rel")" = linked ] || return 1
+    done <<EOF
+$(package_files "$p")
+EOF
+  done
 }
 
 dotfiles_link() {
@@ -94,6 +138,10 @@ dotfiles_link() {
   [ -n "$pkgs" ] || { skip "no stow packages listed for this profile"; return 0; }
   # shellcheck disable=SC2086
   dotfiles_require_packages $pkgs
+  if dotfiles_all_linked $pkgs; then
+    skip "dotfiles already linked: $(echo $pkgs)"
+    return 0
+  fi
   # shellcheck disable=SC2086
   dotfiles_backup_conflicts $pkgs
   # shellcheck disable=SC2086
@@ -139,6 +187,10 @@ EOF
 mise_install() {
   if ! command -v mise >/dev/null 2>&1; then
     skip "mise not installed"
+    return 0
+  fi
+  if [ -z "$(mise ls --missing 2>/dev/null || echo unknown)" ]; then
+    skip "mise runtimes already installed"
     return 0
   fi
   (

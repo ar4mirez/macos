@@ -47,9 +47,34 @@ export MACOS_DRY_RUN MACOS_YES
 require_profile
 brew_env
 lock_acquire
+dry_run || log_to_file
 dry_run && say "Dry run: nothing will be changed."
 
-brew_flag() { if [ "$1" = cask ]; then echo --cask; else echo --formula; fi; }
+brew_flag() {
+  case "$1" in
+    cask) echo --cask ;;
+    tap) echo --tap ;;
+    mas) echo --mas ;;
+    *) echo --formula ;;
+  esac
+}
+
+# is_installed <type> <name>
+is_installed() {
+  case "$1" in
+    tap) brew tap 2>/dev/null | grep -qx "$2" ;;
+    mas) return 1 ;; # App Store apps are removed from Finder/Launchpad, not here
+    *) brew list "$(brew_flag "$1")" "$2" >/dev/null 2>&1 ;;
+  esac
+}
+
+# uninstall_one <type> <name>
+uninstall_one() {
+  case "$1" in
+    tap) run brew untap "$2" ;;
+    *) run brew uninstall "$(brew_flag "$1")" "$2" ;;
+  esac
+}
 
 commit_hint() {
   dry_run && return 0
@@ -136,10 +161,12 @@ apps_remove() {
     skip "keeping $name installed (--keep-installed)"
   elif [ -n "$still_active" ]; then
     skip "keeping $name installed: still declared in $still_active"
-  elif ! brew list "$(brew_flag "$type")" "$name" >/dev/null 2>&1; then
+  elif [ "$type" = mas ]; then
+    skip "remove the App Store app $name from Finder or Launchpad; it is no longer declared"
+  elif ! is_installed "$type" "$name"; then
     skip "$name is not installed"
   elif dry_run || confirm "Uninstall $name now?"; then
-    if run brew uninstall "$(brew_flag "$type")" "$name"; then
+    if uninstall_one "$type" "$name"; then
       ok "uninstalled $name"
     else
       warn "could not uninstall $name (another package may depend on it); 'macos apply --prune' will retry"

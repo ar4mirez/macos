@@ -41,7 +41,11 @@ if [ -n "$adoptable" ]; then
   warn "run 'macos apps adopt' to hand them to Homebrew"
 fi
 
-brew_bundle_install "$MERGED_BREWFILE"
+failed=""
+if ! brew_bundle_install "$MERGED_BREWFILE"; then
+  warn "some apps failed to install (see above); continuing with the rest"
+  failed="$failed apps"
+fi
 
 if [ "$prune" = 1 ]; then
   step "Prune"
@@ -63,4 +67,7 @@ system_apply
 step "Identity"
 MACOS_YES=1 identity_apply
 
+if [ -n "$failed" ]; then
+  die "apply finished with errors in:$failed"
+fi
 ok "apply finished"

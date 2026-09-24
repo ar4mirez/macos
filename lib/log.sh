@@ -26,8 +26,9 @@ die()  { _MACOS_ERR_REPORTED=1; printf '%s  x%s %s\n' "$_C_RED" "$_C_RESET" "$*"
 # under $MACOS_STATE/logs. Call once, near the start of a mutating command.
 log_to_file() {
   local dir="$MACOS_STATE/logs"
-  mkdir -p "$dir"
+  (umask 077 && mkdir -p "$dir")
   MACOS_LOG="$dir/$(date +%Y%m%d-%H%M%S)-${0##*/}.log"
+  (umask 077 && : >>"$MACOS_LOG")
   export MACOS_LOG
   # Keep the real terminal on fds 4/5 for interactive tools (gh, sudo) that
   # refuse to prompt when stdout is a pipe.

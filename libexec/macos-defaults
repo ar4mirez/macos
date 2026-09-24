@@ -15,8 +15,11 @@ for _lib in run lock profile pending defaults system; do
 done
 unset _lib
 
-action="${1:-check}"
-[ $# -gt 0 ] && shift
+action="check"
+case "${1:-}" in
+  "" | -*) ;; # no action given: options only
+  *) action="$1"; shift ;;
+esac
 while [ $# -gt 0 ]; do
   case "$1" in
     -n | --dry-run) MACOS_DRY_RUN=1 ;;

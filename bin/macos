@@ -50,7 +50,7 @@ usage() {
 # find_bash4 — print the path of a bash >= 4, or fail.
 find_bash4() {
   local b
-  for b in "${MACOS_BASH:-}" /opt/homebrew/bin/bash /usr/local/bin/bash "$(command -v bash || true)"; do
+  for b in "${MACOS_BASH:-}" "${HOMEBREW_PREFIX:-/opt/homebrew}/bin/bash" /usr/local/bin/bash "$(command -v bash || true)"; do
     [ -n "$b" ] && [ -x "$b" ] || continue
     if "$b" -c '[ "${BASH_VERSINFO[0]}" -ge 4 ]' 2>/dev/null; then
       printf '%s\n' "$b"

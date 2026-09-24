@@ -38,11 +38,11 @@ migrations_mark_all() {
 migrations_run() {
   local m pending
   pending="$(migrations_pending)"
+  run mkdir -p "$MIGRATIONS_STATE"
   if [ -z "$pending" ]; then
     skip "no pending migrations"
     return 0
   fi
-  run mkdir -p "$MIGRATIONS_STATE"
   for m in $pending; do
     say "Migration $m"
     if dry_run; then

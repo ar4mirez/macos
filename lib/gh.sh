@@ -19,6 +19,12 @@ gh_ensure_auth() {
     ok "gh logged in"
   else
     scopes=" $(gh_scopes) "
+    if [ "$scopes" = "  " ]; then
+      # Fine-grained tokens (and some GH_TOKEN setups) report no classic
+      # scopes; they may still be enough, so let the key upload tell.
+      warn "can't read gh token scopes (fine-grained token?); key uploads need 'admin:public_key' and 'admin:ssh_signing_key' access"
+      scopes=" $GH_EXTRA_SCOPES "
+    fi
     for s in $GH_EXTRA_SCOPES; do
       case "$scopes" in *" $s "*) ;; *) missing="$missing,$s" ;; esac
     done

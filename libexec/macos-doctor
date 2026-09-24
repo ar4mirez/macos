@@ -69,11 +69,17 @@ if brew list --cask claude-code >/dev/null 2>&1; then
   bad "the claude-code cask is installed; it shadows the native Claude Code in ~/.local/bin"
 fi
 x86=""
-for app in "${MACOS_APPLICATIONS_DIRS%% *}"/*.app; do
-  [ -d "$app" ] || continue
-  exe="$(plutil -extract CFBundleExecutable raw "$app/Contents/Info.plist" 2>/dev/null || true)"
-  [ -n "$exe" ] && [ -f "$app/Contents/MacOS/$exe" ] || continue
-  lipo -archs "$app/Contents/MacOS/$exe" 2>/dev/null | grep -q arm64 || x86="$x86 $(basename "$app" .app)"
+for dir in $MACOS_APPLICATIONS_DIRS; do
+  for app in "$dir"/*.app; do
+    [ -d "$app" ] || continue
+    exe="$(plutil -extract CFBundleExecutable raw "$app/Contents/Info.plist" 2>/dev/null || true)"
+    [ -n "$exe" ] && [ -f "$app/Contents/MacOS/$exe" ] || continue
+    # lipo fails on non-Mach-O launchers (scripts): nothing to judge there.
+    archs="$(lipo -archs "$app/Contents/MacOS/$exe" 2>/dev/null || true)"
+    if [ -n "$archs" ] && ! printf '%s' "$archs" | grep -q arm64; then
+      x86="$x86 $(basename "$app" .app)"
+    fi
+  done
 done
 if [ -n "$x86" ]; then meh "Intel-only apps (need Rosetta, which is going away):$x86"; else good "every app runs natively on Apple silicon"; fi
 
@@ -126,6 +132,18 @@ else
   pending_done 1password
   good "1Password SSH agent answering with $(agent_keys | wc -l | tr -d ' ') key(s)"
   if [ -f "$IDENTITY_VERIFIED" ]; then
+    # Signing: git must point at an executable signer and a key the agent holds.
+    sk="$(git config --global --includes --get user.signingkey 2>/dev/null || true)"
+    prog="$(git config --global --includes --get gpg.ssh.program 2>/dev/null || true)"
+    if [ "$(git config --global --includes --get commit.gpgsign 2>/dev/null || true)" != true ]; then
+      meh "commit signing is off"
+    elif [ -z "$prog" ] || [ ! -x "$prog" ]; then
+      bad "commit signing is on but the signer '$prog' is missing"
+    elif ! agent_keys | grep -qxF "$(key_material "$sk")"; then
+      bad "commit signing is on but its key is not in the 1Password agent"
+    else
+      good "commits are signed through 1Password"
+    fi
     # ssh -T to GitHub always exits 1 (no shell); judge by its greeting.
     if { ssh -T -o BatchMode=yes -o ConnectTimeout=5 git@github.com 2>&1 || true; } | grep -q 'successfully authenticated'; then
       good "ssh to GitHub authenticates through 1Password"

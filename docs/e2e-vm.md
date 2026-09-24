@@ -27,8 +27,11 @@ ssh admin@"$(tart ip macos-e2e)"
 Inside the VM:
 
 ```sh
-# Non-interactive first pass (the private dotfiles clone needs a token):
-export GH_TOKEN=<fine-grained token with read access to ar4mirez/macos-dotfiles>
+# Non-interactive first pass. The private dotfiles clone needs a token; a
+# classic token with scopes repo, read:org, admin:public_key and
+# admin:ssh_signing_key covers the whole run. (A fine-grained token only
+# gets a warning, since gh can't report its scopes; key uploads may then fail.)
+export GH_TOKEN=<token>
 curl -fsSL https://raw.githubusercontent.com/ar4mirez/macos/main/boot.sh |
   bash -s -- --yes --profile work --hostname e2e-vm
 

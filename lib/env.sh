@@ -37,7 +37,7 @@ machine_env_set() {
   local key="$1" val="$2" rest=""
   if [ -f "$MACOS_MACHINE_ENV" ]; then
     rest="$(grep -v "^$key=" "$MACOS_MACHINE_ENV" || true)"
-    if grep -qx "$key=\"$val\"" "$MACOS_MACHINE_ENV"; then
+    if grep -qxF "$key=\"$val\"" "$MACOS_MACHINE_ENV"; then
       return 0
     fi
   fi

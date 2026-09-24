@@ -3,10 +3,12 @@
 # macos:usage=macos uninstall [--dry-run] [--yes]
 #
 # Removes what the engine put in place for itself: the dotfile symlinks,
-# ~/.local/bin/macos and the engine clone. Deliberately kept: installed
-# apps, macOS settings, Touch ID for sudo, ~/.dotfiles, and
-# ~/.local/state/macos, which holds the backups of files the dotfiles
-# replaced.
+# the files `macos identity` generated, ~/.local/bin/macos and the engine
+# clone; then restores the files the dotfiles had replaced (from
+# ~/.local/state/macos/backup), so the shell keeps its Homebrew and
+# ~/.local/bin setup. Deliberately kept: installed apps, macOS settings
+# (including the Caps Lock LaunchAgent and Touch ID for sudo), GitHub's
+# host keys in ~/.ssh/known_hosts, ~/.dotfiles, and ~/.local/state/macos.
 
 # shellcheck source=lib/common.sh
 . "${MACOS_ROOT:=$(cd -- "$(dirname -- "$0")/.." && pwd -P)}/lib/common.sh"
@@ -43,6 +45,16 @@ fi
 if [ -L "$HOME/.1password/agent.sock" ]; then
   run rm -f "$HOME/.1password/agent.sock"
 fi
+for f in "$HOME/.config/git/identity.gitconfig" "$HOME/.config/git/allowed_signers" \
+  "$HOME/.ssh/config.d/macos-identity" "$HOME"/.ssh/macos-*.pub; do
+  if [ -e "$f" ]; then
+    run rm -f "$f"
+  fi
+done
+if [ -d "$HOME/.config/git/identity.d" ]; then
+  run rm -rf "$HOME/.config/git/identity.d"
+fi
+dotfiles_restore_backups
 
 step "Engine"
 if engine_cli_linked; then

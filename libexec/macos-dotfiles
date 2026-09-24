@@ -16,8 +16,11 @@ for _lib in run lock profile dotfiles; do
 done
 unset _lib
 
-action="${1:-status}"
-[ $# -gt 0 ] && shift
+action="status"
+case "${1:-}" in
+  "" | -*) ;; # no action given: options only
+  *) action="$1"; shift ;;
+esac
 while [ $# -gt 0 ]; do
   case "$1" in
     -n | --dry-run) MACOS_DRY_RUN=1 ;;
@@ -33,11 +36,13 @@ command -v stow >/dev/null 2>&1 || die "GNU Stow is not installed; run 'macos ap
 case "$action" in
   link)
     lock_acquire
+    dry_run || log_to_file
     dry_run && say "Dry run: nothing will be changed."
     dotfiles_link
     ;;
   unlink)
     lock_acquire
+    dry_run || log_to_file
     dry_run && say "Dry run: nothing will be changed."
     dotfiles_unlink
     ;;

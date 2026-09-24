@@ -131,7 +131,7 @@ brew_prune() {
   if dry_run; then
     return 0
   fi
-  warn "This also resets Homebrew's tap trust store to what the Brewfiles declare."
+  warn "This also resets Homebrew's tap trust store to what the Brewfiles declare, and runs 'brew cleanup'."
   if ! confirm "Uninstall these now?"; then
     skip "prune cancelled; nothing removed"
     return 0
