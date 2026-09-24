@@ -236,7 +236,7 @@ Conventions:
 7. **Operations:** migrations, `doctor`, `update`, `uninstall`. *(done)*
 8. **Fresh-VM end-to-end test:** run `boot.sh` on a clean macOS VM. *(to do; see [docs/e2e-vm.md](docs/e2e-vm.md))*
 
-Not managed on purpose (for now): 1Password's `agent.toml` (its defaults serve every SSH key, which works), and nvim/tmux/atuin/bat configs (the tools are installed with their defaults).
+Not managed on purpose (for now): 1Password's `agent.toml` (its defaults serve every SSH key, which works), and nvim/atuin/bat configs (the tools are installed with their defaults). The tmux config lives in the dotfiles repo.
 
 ## License
 
