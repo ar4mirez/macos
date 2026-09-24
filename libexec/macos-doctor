@@ -126,7 +126,8 @@ else
   pending_done 1password
   good "1Password SSH agent answering with $(agent_keys | wc -l | tr -d ' ') key(s)"
   if [ -f "$IDENTITY_VERIFIED" ]; then
-    if ssh -T -o BatchMode=yes -o ConnectTimeout=5 git@github.com 2>&1 | grep -q 'successfully authenticated'; then
+    # ssh -T to GitHub always exits 1 (no shell); judge by its greeting.
+    if { ssh -T -o BatchMode=yes -o ConnectTimeout=5 git@github.com 2>&1 || true; } | grep -q 'successfully authenticated'; then
       good "ssh to GitHub authenticates through 1Password"
     else
       meh "ssh to GitHub did not authenticate"

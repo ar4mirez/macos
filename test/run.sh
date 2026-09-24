@@ -1193,6 +1193,46 @@ t_identity_real_git_resolution() {
 }
 check "real git picks the org identity by directory and by remote URL" t_identity_real_git_resolution
 
+t_identity_agent_titles() {
+  identity_env; agent_up
+  sed -i '' "s#| $KEY_DEF#| agent:GitHub personal#; s#| $KEY_WORK |#| agent:GitHub Cuemby |#" "$MACOS_DOTFILES/macos/orgs.conf"
+  STUB_SSH_ADD_OUT="$(printf 'ssh-ed25519 AAAAC3NzaDEFAULTKEY GitHub personal\nssh-ed25519 AAAAC3NzaWORKKEY GitHub Cuemby')" \
+    STUB_GH_API_USER_OUT=ar4mirez "$M" identity --yes >"$SANDBOX/o" 2>&1 || { cat "$SANDBOX/o"; return 1; }
+  grep -q 'signingkey = ssh-ed25519 AAAAC3NzaDEFAULTKEY$' "$IG" &&
+    grep -q 'signingkey = ssh-ed25519 AAAAC3NzaWORKKEY$' "$HOME/.config/git/identity.d/cuemby.gitconfig" &&
+    grep -q 'gpgsign = true' "$HOME/.config/git/identity.d/cuemby.gitconfig" || { cat "$SANDBOX/o"; return 1; }
+}
+check "signing_key agent:<title> resolves to the 1Password key with that title" t_identity_agent_titles
+
+t_identity_agent_title_missing() {
+  identity_env; agent_up
+  sed -i '' "s#| $KEY_WORK |#| agent:No Such Key |#" "$MACOS_DOTFILES/macos/orgs.conf"
+  STUB_GH_API_USER_OUT=ar4mirez "$M" identity --yes >"$SANDBOX/o" 2>&1 || { cat "$SANDBOX/o"; return 1; }
+  grep -q "cuemby: no key titled 'No Such Key'" "$SANDBOX/o" && grep -q 'gpgsign = false' "$HOME/.config/git/identity.d/cuemby.gitconfig"
+}
+check "an unknown agent: title leaves that org unsigned, with a warning" t_identity_agent_title_missing
+
+t_identity_blocked_hint() {
+  identity_env; agent_down
+  # A directory we cannot list stands in for macOS privacy protection.
+  mkdir -p "$SANDBOX/op" && chmod 000 "$SANDBOX/op"
+  local fakels="$SANDBOX/fakels"; mkdir -p "$fakels"
+  printf '#!/bin/bash\necho "ls: $1: Operation not permitted" >&2\nexit 1\n' >"$fakels/ls"; chmod +x "$fakels/ls"
+  PATH="$fakels:$PATH" "$M" identity --yes >"$SANDBOX/o" 2>&1
+  chmod 755 "$SANDBOX/op"
+  grep -q "macOS is blocking access to 1Password's data folder" "$SANDBOX/o" || { cat "$SANDBOX/o"; return 1; }
+}
+check "identity explains a macOS privacy block on 1Password's folder" t_identity_blocked_hint
+
+t_doctor_ssh_greeting() {
+  identity_env; agent_up
+  STUB_GH_API_USER_OUT=ar4mirez "$M" identity --yes >/dev/null 2>&1
+  ( STUB_SSH_RC=1 STUB_SSH_OUT="Hi ar4mirez! You've successfully authenticated, but GitHub does not provide shell access." \
+      "$M" doctor >"$SANDBOX/o" 2>&1 )
+  grep -q 'ok    ssh to GitHub authenticates through 1Password' "$SANDBOX/o" || { cat "$SANDBOX/o"; return 1; }
+}
+check "doctor accepts GitHub's ssh greeting although ssh -T exits 1" t_doctor_ssh_greeting
+
 t_apply_never_waits_for_agent() {
   identity_env; agent_down
   "$M" apply </dev/null >"$SANDBOX/o" 2>&1 || { cat "$SANDBOX/o"; return 1; }

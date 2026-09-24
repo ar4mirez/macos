@@ -5,6 +5,8 @@
 #   org | directory | email | github_user | signing_key | github_owners
 #
 # `default` is the identity used everywhere else (directory is ignored).
+# signing_key is a public key, or `agent:<title>` to use the 1Password key
+# with that item title (1Password puts the title in the key's comment).
 # github_owners (optional, space-separated GitHub orgs/users) also selects
 # the identity by remote URL, not only by directory. Generated files are
 # machine-local and never committed:
@@ -57,6 +59,34 @@ agent_ready() { SSH_AUTH_SOCK="$OP_AGENT_SOCK" ssh-add -l >/dev/null 2>&1; }
 
 agent_keys() { SSH_AUTH_SOCK="$OP_AGENT_SOCK" ssh-add -L 2>/dev/null | awk '{ print $1, $2 }'; }
 
+# orgs_resolve <lines> <agent keys with comments> — replace `agent:<title>`
+# keys with the matching agent key; unmatched ones become empty (unsigned).
+orgs_resolve() {
+  local org dir email user key owners title found
+  while IFS='|' read -r org dir email user key owners; do
+    [ -n "$org" ] || continue
+    case "$key" in
+      agent:*)
+        title="${key#agent:}"
+        found="$(printf '%s\n' "$2" | awk -v t="$title" '{ c = $0; sub(/^[^ ]+ [^ ]+ ?/, "", c) } c == t { print $1, $2; exit }')"
+        if [ -z "$found" ] && [ -n "$2" ]; then
+          warn "$org: no key titled '$title' in the 1Password agent"
+        fi
+        key="$found"
+        ;;
+    esac
+    printf '%s|%s|%s|%s|%s|%s\n' "$org" "$dir" "$email" "$user" "$key" "$owners"
+  done <<EOF
+$1
+EOF
+}
+
+# agent_blocked — macOS privacy protection is denying access to 1Password's
+# data folder (first access from a terminal needs your OK in a prompt).
+# (ls fails either way; `|| true` keeps pipefail from masking grep's match.)
+# shellcheck disable=SC2010 # matching ls's error message, not file names
+agent_blocked() { { ls "$(dirname "$OP_AGENT_SOCK")" 2>&1 || true; } | grep -q 'Operation not permitted'; }
+
 # identity_wait_agent — true once the agent answers with at least one key.
 # Interactive runs open 1Password and let you retry; otherwise it becomes a
 # pending step.
@@ -66,6 +96,9 @@ identity_wait_agent() {
     return 0
   fi
   pending_add 1password "Sign in to 1Password; in Settings → Developer turn on 'Use the SSH agent' and 'Integrate with 1Password CLI'; then run 'macos identity'"
+  if agent_blocked; then
+    warn "macOS is blocking access to 1Password's data folder; run 'macos identity' from your own terminal and allow access when macOS asks"
+  fi
   if [ "$MACOS_YES" = 1 ] || dry_run; then
     warn "1Password SSH agent is not answering yet; signing and ssh config wait for it"
     return 1
@@ -257,6 +290,7 @@ identity_apply() {
     keys="$(agent_keys)"
     dry_run && [ -z "$keys" ] && keys="(dry run)"
   fi
+  lines="$(orgs_resolve "$lines" "$(SSH_AUTH_SOCK="$OP_AGENT_SOCK" ssh-add -L 2>/dev/null || true)")"
   identity_render "$lines" "$keys"
 
   if [ -z "$keys" ]; then
