@@ -12,7 +12,7 @@ ROOT="$(cd -- "$(dirname -- "$0")/.." && pwd -P)"
 SANDBOX="$(mktemp -d "${TMPDIR:-/tmp}/macos-test.XXXXXX")"
 trap 'rm -rf "$SANDBOX"' EXIT
 
-STUBBED_TOOLS="defaults killall osascript scutil sudo brew mas dockutil duti softwareupdate hidutil pmset gh op git curl xcode-select uname mise open"
+STUBBED_TOOLS="defaults killall osascript scutil sudo brew mas dockutil duti softwareupdate hidutil pmset gh op git curl xcode-select uname mise open ssh-add"
 
 REAL_HOME="$HOME"
 export HOME="$SANDBOX/home"
@@ -202,7 +202,7 @@ check "bootstrap is dispatched under bash 3.2" t_bootstrap_runs_on_bash32
 t_bash4_override() {
   [ -n "$BASH4" ] || { echo "no bash 4 available"; return 0; }
   local rc=0
-  MACOS_BASH="$BASH4" "$M" identity >"$SANDBOX/o" 2>&1 || rc=$?
+  MACOS_BASH="$BASH4" "$M" doctor >"$SANDBOX/o" 2>&1 || rc=$?
   [ "$rc" -eq 2 ] && grep -q 'not implemented' "$SANDBOX/o"
 }
 check "bash-4 subcommands run under MACOS_BASH" t_bash4_override
@@ -1070,6 +1070,131 @@ t_system_check() {
     ! grep -qE '^(duti|dockutil --add|open)' "$STUB_LOG"
 }
 check "defaults check also reports Dock and browser drift, read-only" t_system_check
+
+# ---------------------------------------------------------------------------
+section "identity"
+
+KEY_DEF="ssh-ed25519 AAAAC3NzaDEFAULTKEY personal"
+KEY_WORK="ssh-ed25519 AAAAC3NzaWORKKEY work"
+export OP_AGENT_SOCK="$SANDBOX/op/agent.sock"
+
+identity_env() {
+  dotfiles_env
+  rm -rf "$HOME" && mkdir -p "$HOME/.ssh"
+  printf '' >"$MACOS_DOTFILES/macos/profiles/base/stow.list"
+  printf '' >"$MACOS_DOTFILES/macos/profiles/work/stow.list"
+  mkdir -p "$MACOS_DOTFILES/ssh/.ssh"
+  printf 'Host *\n  IdentityAgent "~/.1password/agent.sock"\n' >"$MACOS_DOTFILES/ssh/.ssh/config"
+  cat >"$MACOS_DOTFILES/macos/orgs.conf" <<ORGS
+# org | directory | email | github_user | signing_key | github_owners
+default | ~ | me@personal.dev | ar4mirez | $KEY_DEF
+cuemby  | ~/Work/Cuemby | angel@cuemby.com | ar4mirez | $KEY_WORK | cuemby cuemby-labs
+ORGS
+}
+agent_up() {
+  STUB_SSH_ADD_OUT="$(printf '%s\n%s' "$KEY_DEF" "$KEY_WORK")"
+  export STUB_SSH_ADD_RC=0 STUB_SSH_ADD_OUT
+}
+agent_down() { export STUB_SSH_ADD_RC=2; unset STUB_SSH_ADD_OUT; }
+IG="$HOME/.config/git/identity.gitconfig"
+
+t_identity_none() {
+  identity_env; printf '# nothing yet\n' >"$MACOS_DOTFILES/macos/orgs.conf"
+  "$M" identity --yes >"$SANDBOX/o" 2>&1 || { cat "$SANDBOX/o"; return 1; }
+  grep -q 'no identities' "$SANDBOX/o" && [ ! -e "$HOME/.config/git/identity.gitconfig" ]
+}
+check "identity with an empty orgs.conf changes nothing" t_identity_none
+
+t_identity_invalid() {
+  identity_env
+  printf 'default | ~ | other@x.dev | ar4mirez |\n' >>"$MACOS_DOTFILES/macos/orgs.conf"
+  "$M" identity --yes >"$SANDBOX/o" 2>&1 && return 1
+  grep -q 'org default declared twice' "$SANDBOX/o"
+}
+check "identity rejects an invalid orgs.conf" t_identity_invalid
+
+t_identity_agent_down() {
+  identity_env; agent_down
+  "$M" identity --yes >"$SANDBOX/o" 2>&1 || { cat "$SANDBOX/o"; return 1; }
+  (agent_up)
+  grep -q 'email = me@personal.dev' "$IG" && grep -q 'gpgsign = false' "$IG" && ! grep -q '\[gpg' "$IG" &&
+    grep -q 'includeIf "gitdir:~/Work/Cuemby/"' "$IG" &&
+    [ ! -e "$HOME/.ssh/config" ] && [ ! -e "$MACOS_STATE/identity.verified" ] &&
+    grep -q '^1password|' "$MACOS_STATE/pending" && ! grep -q 'ssh-key add' "$STUB_LOG" || { cat "$SANDBOX/o"; return 1; }
+}
+check "without the 1Password agent: identities written, signing and ssh wait, pending added" t_identity_agent_down
+
+t_identity_agent_up() {
+  identity_env; agent_up
+  STUB_GH_API_USER_OUT=ar4mirez "$M" identity --yes >"$SANDBOX/o" 2>&1 || { cat "$SANDBOX/o"; return 1; }
+  local W="$HOME/.config/git/identity.d/cuemby.gitconfig"
+  grep -q 'gpgsign = true' "$IG" && grep -q "program = $OP_SSH_SIGN" "$IG" &&
+    grep -q "signingkey = ssh-ed25519 AAAAC3NzaDEFAULTKEY$" "$IG" &&
+    grep -q 'includeIf "hasconfig:remote.\*.url:git@github.com:cuemby-labs/\*\*"' "$IG" &&
+    grep -q 'includeIf "hasconfig:remote.\*.url:https://github.com/cuemby/\*\*"' "$IG" &&
+    grep -q 'email = angel@cuemby.com' "$W" && grep -q 'gpgsign = true' "$W" && ! grep -q insteadOf "$W" &&
+    grep -qx 'me@personal.dev namespaces="git" ssh-ed25519 AAAAC3NzaDEFAULTKEY' "$HOME/.config/git/allowed_signers" &&
+    [ "$(readlink "$HOME/.1password/agent.sock")" = "$OP_AGENT_SOCK" ] &&
+    is_link_into_repo .ssh/config ssh && grep -q 'IdentityFile ~/.ssh/macos-default.pub' "$HOME/.ssh/config.d/macos-identity" &&
+    [ "$(cat "$HOME/.ssh/macos-cuemby.pub")" = "ssh-ed25519 AAAAC3NzaWORKKEY" ] &&
+    [ "$(grep -c '^gh ssh-key add .*--type authentication' "$STUB_LOG")" -eq 2 ] &&
+    [ "$(grep -c '^gh ssh-key add .*--type signing' "$STUB_LOG")" -eq 2 ] &&
+    grep -q '^gh config set git_protocol ssh' "$STUB_LOG" && [ -f "$MACOS_STATE/identity.verified" ] &&
+    ! grep -q '^1password|' "$MACOS_STATE/pending" 2>/dev/null || { cat "$SANDBOX/o"; return 1; }
+}
+check "with the agent: signing on, ssh linked, keys uploaded, gh switched to ssh" t_identity_agent_up
+
+t_identity_idempotent() {
+  identity_env; agent_up
+  STUB_GH_API_USER_OUT=ar4mirez "$M" identity --yes >/dev/null 2>&1; : >"$STUB_LOG"
+  STUB_GH_API_USER_OUT=ar4mirez STUB_GH_API_USER_KEYS_OUT="$(printf '%s\n%s' "$KEY_DEF" "$KEY_WORK")" \
+    STUB_GH_API_USER_SSH_SIGNING_KEYS_OUT="$(printf '%s\n%s' "$KEY_DEF" "$KEY_WORK")" STUB_GH_CONFIG_GET_OUT=ssh \
+    "$M" identity --yes >"$SANDBOX/o" 2>&1 || { cat "$SANDBOX/o"; return 1; }
+  grep -q 'already up to date' "$SANDBOX/o" && ! grep -qE 'ssh-key add|config set' "$STUB_LOG"
+}
+check "identity twice changes nothing and uploads nothing" t_identity_idempotent
+
+t_identity_key_not_in_agent() {
+  identity_env; export STUB_SSH_ADD_RC=0 STUB_SSH_ADD_OUT="$KEY_DEF"
+  STUB_GH_API_USER_OUT=ar4mirez "$M" identity --yes >"$SANDBOX/o" 2>&1 || { cat "$SANDBOX/o"; return 1; }
+  grep -q 'gpgsign = true' "$IG" && grep -q 'gpgsign = false' "$HOME/.config/git/identity.d/cuemby.gitconfig" &&
+    grep -q 'cuemby: signing key is not in the 1Password agent' "$SANDBOX/o"
+}
+check "an org whose key is not in the agent stays unsigned, with a warning" t_identity_key_not_in_agent
+
+t_identity_other_account() {
+  identity_env; agent_up
+  sed -i '' 's/| angel@cuemby.com | ar4mirez |/| angel@cuemby.com | angel-cuemby |/' "$MACOS_DOTFILES/macos/orgs.conf"
+  STUB_GH_API_USER_OUT=ar4mirez "$M" identity --yes >"$SANDBOX/o" 2>&1 || { cat "$SANDBOX/o"; return 1; }
+  grep -q 'insteadOf = git@github.com:' "$HOME/.config/git/identity.d/cuemby.gitconfig" &&
+    grep -q '^Host github.com-cuemby' "$HOME/.ssh/config.d/macos-identity" &&
+    grep -q '^github-keys-cuemby|' "$MACOS_STATE/pending" &&
+    [ "$(grep -c '^gh ssh-key add' "$STUB_LOG")" -eq 2 ]
+}
+check "a second GitHub account gets an ssh alias and a pending key upload" t_identity_other_account
+
+t_identity_real_git_resolution() {
+  identity_env; agent_up
+  STUB_GH_API_USER_OUT=ar4mirez "$M" identity --yes >/dev/null 2>&1
+  printf '[include]\n\tpath = ~/.config/git/identity.gitconfig\n' >"$HOME/.config/git/config"
+  mkdir -p "$HOME/Work/Cuemby/app" "$HOME/code/other" "$HOME/code/viaremote"
+  local g="env -u XDG_CONFIG_HOME -u GIT_CONFIG_GLOBAL /usr/bin/git"
+  $g -C "$HOME/Work/Cuemby/app" init -q && $g -C "$HOME/code/other" init -q && $g -C "$HOME/code/viaremote" init -q
+  $g -C "$HOME/code/viaremote" remote add origin git@github.com:cuemby-labs/tool.git
+  [ "$($g -C "$HOME/Work/Cuemby/app" config user.email)" = angel@cuemby.com ] &&
+    [ "$($g -C "$HOME/code/other" config user.email)" = me@personal.dev ] &&
+    [ "$($g -C "$HOME/code/viaremote" config user.email)" = angel@cuemby.com ] &&
+    [ "$($g -C "$HOME/code/other" config gpg.format)" = ssh ] &&
+    [ "$($g -C "$HOME/Work/Cuemby/app" config user.signingkey)" = "ssh-ed25519 AAAAC3NzaWORKKEY" ]
+}
+check "real git picks the org identity by directory and by remote URL" t_identity_real_git_resolution
+
+t_apply_never_waits_for_agent() {
+  identity_env; agent_down
+  "$M" apply </dev/null >"$SANDBOX/o" 2>&1 || { cat "$SANDBOX/o"; return 1; }
+  grep -q '1Password SSH agent is not answering' "$SANDBOX/o" && ! grep -q '^open -a 1Password' "$STUB_LOG"
+}
+check "apply renders identities but never waits on 1Password" t_apply_never_waits_for_agent
 
 # ---------------------------------------------------------------------------
 section "boot.sh"

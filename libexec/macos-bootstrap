@@ -8,7 +8,7 @@
 
 # shellcheck source=lib/common.sh
 . "${MACOS_ROOT:=$(cd -- "$(dirname -- "$0")/.." && pwd -P)}/lib/common.sh"
-for _lib in run prompt lock pending sudo security brew repo gh profile dotfiles defaults system; do
+for _lib in run prompt lock pending sudo security brew repo gh profile dotfiles defaults system identity; do
   # shellcheck source=/dev/null
   . "$MACOS_ROOT/lib/$_lib.sh"
 done
@@ -127,9 +127,17 @@ else
   system_apply
 fi
 
+# --- 9. Identity ----------------------------------------------------------------
+step "Identity"
+if dry_run && [ ! -d "$MACOS_DOTFILES/macos/profiles/base" ]; then
+  skip "dotfiles not cloned yet; would set up git identities and 1Password SSH"
+else
+  identity_apply
+fi
+
 # --- Not built yet --------------------------------------------------------------
 step "Remaining setup"
-warn "Coming in later phases: 1Password + identity (6), migrations + doctor (7)."
+warn "Coming in a later phase: migrations + doctor (7)."
 say "Open a new terminal window (or run: exec zsh -l) to load the linked shell config."
 if [ -n "$(pending_list)" ]; then
   say "Manual steps still to do:"

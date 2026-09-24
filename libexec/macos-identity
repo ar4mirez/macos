@@ -1,8 +1,34 @@
 #!/usr/bin/env bash
 # macos:summary=Configure 1Password SSH agent, git identities and commit signing
-# macos:usage=macos identity [--dry-run]
+# macos:usage=macos identity [--dry-run] [--yes]
+#
+# Reads macos/orgs.conf from the dotfiles repo. Git identities (per-org via
+# includeIf by directory and by remote) are written right away; SSH config,
+# commit signing and GitHub key uploads wait until the 1Password SSH agent
+# answers. Safe to re-run: it resumes where it stopped.
 
 # shellcheck source=lib/common.sh
 . "${MACOS_ROOT:=$(cd -- "$(dirname -- "$0")/.." && pwd -P)}/lib/common.sh"
+for _lib in run prompt lock pending profile dotfiles identity; do
+  # shellcheck source=/dev/null
+  . "$MACOS_ROOT/lib/$_lib.sh"
+done
+unset _lib
 
-not_implemented 6
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -n | --dry-run) MACOS_DRY_RUN=1 ;;
+    -y | --yes) MACOS_YES=1 ;;
+    *) die "unknown option: $1 (see 'macos identity --help')" ;;
+  esac
+  shift
+done
+export MACOS_DRY_RUN MACOS_YES
+
+require_profile
+lock_acquire
+dry_run || log_to_file
+dry_run && say "Dry run: nothing will be changed."
+
+step "Identity"
+identity_apply

@@ -8,7 +8,7 @@
 
 # shellcheck source=lib/common.sh
 . "${MACOS_ROOT:=$(cd -- "$(dirname -- "$0")/.." && pwd -P)}/lib/common.sh"
-for _lib in run prompt lock pending sudo brew profile dotfiles defaults system; do
+for _lib in run prompt lock pending sudo brew profile dotfiles defaults system identity; do
   # shellcheck source=/dev/null
   . "$MACOS_ROOT/lib/$_lib.sh"
 done
@@ -57,5 +57,10 @@ mise_install
 step "Defaults"
 defaults_apply
 system_apply
+
+# Never waits on 1Password here: without the agent this renders identities
+# and leaves signing pending (see `macos identity`).
+step "Identity"
+MACOS_YES=1 identity_apply
 
 ok "apply finished"

@@ -3,6 +3,8 @@
 # mirror $HOME; which ones apply comes from the base and profile stow.list.
 # bash-3.2-safe. Requires lib/common.sh, lib/run.sh and lib/profile.sh.
 
+IDENTITY_PACKAGES="ssh"
+
 # Files stow never links (on top of its defaults: README*, LICENSE*, .git…).
 STOW_IGNORE='\.DS_Store'
 
@@ -14,6 +16,13 @@ stow_packages() {
     [ -f "$f" ] || continue
     sed -e 's/#.*//' -e 's/[[:space:]]//g' "$f" | grep -v '^$' || true
   done | awk '!seen[$0]++'
+  # Identity packages (ssh) point at the 1Password agent, so they are linked
+  # only once `macos identity` has verified it.
+  if [ -f "$MACOS_STATE/identity.verified" ] || [ "${IDENTITY_READY:-}" = 1 ]; then
+    for p in $IDENTITY_PACKAGES; do
+      [ -d "$MACOS_DOTFILES/$p" ] && echo "$p"
+    done
+  fi
 }
 
 # package_files <package> — files a package would link, relative to $HOME.

@@ -19,3 +19,7 @@
 : "${MANAGED_PREFS_DIR:=/Library/Managed Preferences/$USER}"
 # LaunchServices handler database (default browser lives here).
 : "${LAUNCHSERVICES_PLIST:=$HOME/Library/Preferences/com.apple.LaunchServices/com.apple.launchservices.secure.plist}"
+
+# 1Password's SSH agent socket (the path has a space, so ssh config and
+# SSH_AUTH_SOCK use the ~/.1password/agent.sock symlink instead).
+: "${OP_AGENT_SOCK:=$HOME/Library/Group Containers/2BUA8C4S2C.com.1password/t/agent.sock}"
