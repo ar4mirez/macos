@@ -9,6 +9,13 @@
 set -uo pipefail
 
 ROOT="$(cd -- "$(dirname -- "$0")/.." && pwd -P)"
+# Tests copy the engine checkout and run git in the copy. A git worktree's
+# .git is a file pointing back at the main clone, so the copy would change
+# that clone's config (it once rewrote origin). Run in a clone or a full copy.
+if [ -f "$ROOT/.git" ]; then
+  echo "FATAL: $ROOT is a git worktree; run the tests in a clone or a full copy (cp -R)" >&2
+  exit 1
+fi
 SANDBOX="$(mktemp -d "${TMPDIR:-/tmp}/macos-test.XXXXXX")"
 trap 'rm -rf "$SANDBOX"' EXIT
 
