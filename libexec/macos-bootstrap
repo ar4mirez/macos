@@ -8,7 +8,7 @@
 
 # shellcheck source=lib/common.sh
 . "${MACOS_ROOT:=$(cd -- "$(dirname -- "$0")/.." && pwd -P)}/lib/common.sh"
-for _lib in run prompt lock pending sudo security brew repo gh profile; do
+for _lib in run prompt lock pending sudo security brew repo gh profile dotfiles; do
   # shellcheck source=/dev/null
   . "$MACOS_ROOT/lib/$_lib.sh"
 done
@@ -106,9 +106,22 @@ else
   fi
 fi
 
+# --- 7. Dotfiles and runtimes --------------------------------------------------
+step "Dotfiles"
+if dry_run && [ ! -d "$MACOS_DOTFILES/macos/profiles/base" ]; then
+  skip "dotfiles not cloned yet; would link the $profile packages"
+elif ! command -v stow >/dev/null 2>&1 && dry_run; then
+  skip "stow not installed yet; would link the $profile packages"
+else
+  dotfiles_link
+fi
+step "Runtimes (mise)"
+mise_install
+
 # --- Not built yet --------------------------------------------------------------
 step "Remaining setup"
-warn "Coming in later phases: dotfiles link + mise (4), defaults (5), 1Password + identity (6), migrations + doctor (7)."
+warn "Coming in later phases: defaults (5), 1Password + identity (6), migrations + doctor (7)."
+say "Open a new terminal window (or run: exec zsh -l) to load the linked shell config."
 if [ -n "$(pending_list)" ]; then
   say "Manual steps still to do:"
   pending_list | sed 's/^/  - /' >&2

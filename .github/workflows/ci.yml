@@ -12,6 +12,6 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - name: Install test dependencies
-        run: brew install bash shellcheck jq
+        run: brew install bash shellcheck jq stow
       - name: Run tests
         run: ./test/run.sh

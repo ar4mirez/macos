@@ -8,7 +8,7 @@ A small, declarative Bash engine that sets up and maintains my Macs. It covers:
 - **Identity:** the 1Password SSH agent, SSH commit signing, and per-org git identities.
 - **Profiles:** `base` plus one of `work` or `personal`.
 
-> **Status: Phase 3 (apps).** Bootstrap works through the app install, and `apply`, `upgrade` and `apps` are complete for apps. Dotfiles, defaults, identity and `doctor` are still placeholders that exit with code `2`. See [Roadmap](#roadmap).
+> **Status: Phase 4 (dotfiles).** Bootstrap, `apply`, `upgrade`, `apps` and `dotfiles` work, and mise runtimes are installed. Defaults, identity and `doctor` are still placeholders that exit with code `2`. See [Roadmap](#roadmap).
 
 ## Engine vs. data
 
@@ -93,7 +93,21 @@ macos upgrade                            # upgrade declared packages + mise runt
   - It also resets Homebrew's tap trust store to what the Brewfiles declare.
 - **`upgrade`:** it only *lists* macOS updates, because installing them needs a restart you choose.
 
-## Development
+## Dotfiles
+
+Each top-level directory of the dotfiles repo is a Stow package that mirrors `$HOME`. The `stow.list` files in `base` and in this Mac's profile choose which packages are linked.
+
+```sh
+macos dotfiles status    # linked / missing / conflict per file; exits 1 on drift
+macos dotfiles link      # also part of `macos apply` and `macos bootstrap`
+macos dotfiles unlink
+```
+
+- **Linking:** files are linked one at a time (`stow --no-folding`), so `~/.config` stays a real directory.
+- **Files in the way:** anything already at a target path (a real file, or a symlink pointing elsewhere) is moved to `~/.local/state/macos/backup/<timestamp>/` first. `stow --adopt` is never used, so nothing is pulled into the repo.
+- **Runtimes:** after linking, `apply` runs `mise install` for the runtimes in the mise package.
+
+
 
 ```sh
 ./test/run.sh
@@ -113,7 +127,7 @@ Conventions:
 1. **Scaffold:** dispatcher, libraries, test harness, CI. *(done)*
 2. **Bootstrap:** `boot.sh`, profile selection, security baseline, `gh` auth, HTTPS dotfiles clone, Brewfile install. *(done)*
 3. **Apps:** `apply` / `--prune` / `upgrade` / `apps add|remove|adopt`. *(done)*
-4. **Dotfiles:** Stow link, unlink and status, with backup of conflicting files.
+4. **Dotfiles:** Stow link, unlink and status, with backup of conflicting files; mise runtimes. *(done)*
 5. **Defaults:** the `defaults.conf` engine and imperative steps (Dock, Caps Lock, browser).
 6. **Identity:** 1Password agent, `includeIf` per org, signing keys.
 7. **Operations:** migrations, `doctor`, `update`, `uninstall`.

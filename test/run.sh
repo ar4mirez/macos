@@ -12,7 +12,7 @@ ROOT="$(cd -- "$(dirname -- "$0")/.." && pwd -P)"
 SANDBOX="$(mktemp -d "${TMPDIR:-/tmp}/macos-test.XXXXXX")"
 trap 'rm -rf "$SANDBOX"' EXIT
 
-STUBBED_TOOLS="defaults killall osascript scutil sudo brew mas dockutil duti softwareupdate stow hidutil pmset gh op git curl xcode-select uname mise"
+STUBBED_TOOLS="defaults killall osascript scutil sudo brew mas dockutil duti softwareupdate hidutil pmset gh op git curl xcode-select uname mise"
 
 REAL_HOME="$HOME"
 export HOME="$SANDBOX/home"
@@ -777,6 +777,107 @@ t_adopt_hand_installed() {
   grep -q '^brew install --cask --adopt slack' "$STUB_LOG"
 }
 check "apps adopt hands a hand-installed app to Homebrew" t_adopt_hand_installed
+
+# ---------------------------------------------------------------------------
+section "dotfiles"
+
+# Real GNU Stow: source and target are both inside the sandbox.
+command -v stow >/dev/null 2>&1 || { echo "FATAL: GNU Stow is required for the dotfiles tests" >&2; exit 1; }
+
+dotfiles_env() {
+  phase3_env
+  rm -rf "$HOME" && mkdir -p "$HOME"
+  local d="$MACOS_DOTFILES"
+  mkdir -p "$d/zsh/.config/zsh" "$d/git/.config/git" "$d/extra" "$d/personalonly"
+  printf 'zshrc\n' >"$d/zsh/.zshrc"
+  printf 'a\n' >"$d/zsh/.config/zsh/a.zsh"
+  printf 'readme\n' >"$d/zsh/README.md"
+  printf 'junk\n' >"$d/zsh/.DS_Store"
+  printf '[user]\n' >"$d/git/.config/git/config"
+  printf 'extra\n' >"$d/extra/.extrarc"
+  printf 'p\n' >"$d/personalonly/.personalrc"
+  printf '# base\nzsh\ngit   # comment\n\n' >"$d/macos/profiles/base/stow.list"
+  printf 'extra\ngit\n' >"$d/macos/profiles/work/stow.list"
+  mkdir -p "$d/macos/profiles/personal"
+  printf 'personalonly\n' >"$d/macos/profiles/personal/stow.list"
+}
+
+is_link_into_repo() { [ -L "$HOME/$1" ] && [ "$(readlink -f "$HOME/$1")" = "$(readlink -f "$MACOS_DOTFILES/$2/$1")" ]; }
+
+t_link_fresh() {
+  dotfiles_env
+  "$M" dotfiles link >"$SANDBOX/o" 2>&1 || { cat "$SANDBOX/o"; return 1; }
+  is_link_into_repo .zshrc zsh && is_link_into_repo .config/zsh/a.zsh zsh &&
+    is_link_into_repo .config/git/config git && is_link_into_repo .extrarc extra &&
+    [ -d "$HOME/.config" ] && [ ! -L "$HOME/.config" ] && [ ! -L "$HOME/.config/zsh" ] &&
+    [ ! -e "$HOME/README.md" ] && [ ! -e "$HOME/.DS_Store" ] && [ ! -e "$HOME/.personalrc" ]
+}
+check "link symlinks base + profile packages file by file (no folding)" t_link_fresh
+
+t_link_backs_up() {
+  dotfiles_env
+  printf 'mine\n' >"$HOME/.zshrc"
+  ln -s /somewhere/else "$HOME/.extrarc"
+  "$M" dotfiles link >"$SANDBOX/o" 2>&1 || { cat "$SANDBOX/o"; return 1; }
+  is_link_into_repo .zshrc zsh && is_link_into_repo .extrarc extra &&
+    [ "$(cat "$MACOS_STATE"/backup/*/.zshrc)" = mine ] &&
+    [ "$(readlink "$MACOS_STATE"/backup/*/.extrarc)" = /somewhere/else ] &&
+    grep -q 'Backed up 2 file' "$SANDBOX/o"
+}
+check "link moves real files and foreign symlinks to a backup first" t_link_backs_up
+
+t_link_idempotent() {
+  dotfiles_env
+  "$M" dotfiles link >/dev/null 2>&1 && "$M" dotfiles link >"$SANDBOX/o" 2>&1 || { cat "$SANDBOX/o"; return 1; }
+  [ ! -d "$MACOS_STATE/backup" ] && is_link_into_repo .zshrc zsh
+}
+check "link twice changes nothing and backs nothing up" t_link_idempotent
+
+t_link_dry_run() {
+  dotfiles_env
+  printf 'mine\n' >"$HOME/.zshrc"
+  "$M" dotfiles link --dry-run >"$SANDBOX/o" 2>&1 || { cat "$SANDBOX/o"; return 1; }
+  [ "$(cat "$HOME/.zshrc")" = mine ] && [ ! -L "$HOME/.zshrc" ] && [ ! -e "$HOME/.config/git/config" ] &&
+    grep -q 'would run: mv' "$SANDBOX/o" && grep -q 'would run: stow' "$SANDBOX/o"
+}
+check "link --dry-run touches nothing" t_link_dry_run
+
+t_status() {
+  dotfiles_env
+  "$M" dotfiles link >/dev/null 2>&1
+  "$M" dotfiles status >"$SANDBOX/o" 2>&1 || { cat "$SANDBOX/o"; return 1; }
+  rm "$HOME/.extrarc"
+  printf 'x\n' >"$HOME/.config/zsh/stray.zsh"
+  rm "$HOME/.config/zsh/a.zsh" && printf 'edited\n' >"$HOME/.config/zsh/a.zsh"
+  "$M" dotfiles status >"$SANDBOX/o2" 2>&1 && return 1
+  grep -q 'missing   ~/.extrarc' "$SANDBOX/o2" && grep -q 'conflict  ~/.config/zsh/a.zsh' "$SANDBOX/o2" &&
+    grep -q 'linked    ~/.zshrc' "$SANDBOX/o2"
+}
+check "status reports linked / missing / conflict and exits 1 on drift" t_status
+
+t_unlink() {
+  dotfiles_env
+  "$M" dotfiles link >/dev/null 2>&1
+  "$M" dotfiles unlink >"$SANDBOX/o" 2>&1 || { cat "$SANDBOX/o"; return 1; }
+  [ ! -e "$HOME/.zshrc" ] && [ ! -e "$HOME/.config/git/config" ] && [ -f "$MACOS_DOTFILES/zsh/.zshrc" ]
+}
+check "unlink removes the links and leaves the repo alone" t_unlink
+
+t_link_missing_package() {
+  dotfiles_env
+  printf 'nosuchpkg\n' >>"$MACOS_DOTFILES/macos/profiles/work/stow.list"
+  "$M" dotfiles link >"$SANDBOX/o" 2>&1 && return 1
+  grep -q "names 'nosuchpkg'" "$SANDBOX/o" && [ ! -e "$HOME/.zshrc" ]
+}
+check "link refuses a stow.list entry with no package, before linking anything" t_link_missing_package
+
+t_apply_links_and_installs_runtimes() {
+  dotfiles_env
+  STUB_GH_OUT="gho_SECRETTOKEN123" "$M" apply >"$SANDBOX/o" 2>&1 || { cat "$SANDBOX/o"; return 1; }
+  is_link_into_repo .zshrc zsh && grep -q '^mise install --yes$' "$STUB_LOG" &&
+    ! grep -rq SECRETTOKEN "$SANDBOX/o" "$STUB_LOG" "$MACOS_STATE/logs"
+}
+check "apply links dotfiles and installs mise runtimes without leaking the token" t_apply_links_and_installs_runtimes
 
 # ---------------------------------------------------------------------------
 section "boot.sh"

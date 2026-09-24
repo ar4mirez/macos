@@ -1,8 +1,46 @@
 #!/usr/bin/env bash
 # macos:summary=Link, unlink or inspect the Stow-managed dotfiles
 # macos:usage=macos dotfiles link|unlink|status [--dry-run]
+#
+#   link     symlink this profile's packages (base + profile stow.list) into
+#            $HOME; anything in the way is moved to ~/.local/state/macos/backup
+#   unlink   remove those symlinks (backups are left where they are)
+#   status   show each file as linked, missing or conflict; exits 1 unless
+#            everything is linked
 
 # shellcheck source=lib/common.sh
 . "${MACOS_ROOT:=$(cd -- "$(dirname -- "$0")/.." && pwd -P)}/lib/common.sh"
+for _lib in run lock profile dotfiles; do
+  # shellcheck source=/dev/null
+  . "$MACOS_ROOT/lib/$_lib.sh"
+done
+unset _lib
 
-not_implemented 4
+action="${1:-status}"
+[ $# -gt 0 ] && shift
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -n | --dry-run) MACOS_DRY_RUN=1 ;;
+    *) die "unknown option: $1 (see 'macos dotfiles --help')" ;;
+  esac
+  shift
+done
+export MACOS_DRY_RUN
+
+require_profile
+command -v stow >/dev/null 2>&1 || die "GNU Stow is not installed; run 'macos apply' first"
+
+case "$action" in
+  link)
+    lock_acquire
+    dry_run && say "Dry run: nothing will be changed."
+    dotfiles_link
+    ;;
+  unlink)
+    lock_acquire
+    dry_run && say "Dry run: nothing will be changed."
+    dotfiles_unlink
+    ;;
+  status) dotfiles_status ;;
+  *) die "unknown action '$action' (link, unlink or status)" ;;
+esac
