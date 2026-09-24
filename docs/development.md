@@ -9,7 +9,8 @@ cd ~/Work/Code/ar4mirez/macos
 # edit…
 make check          # full suite, sandboxed: safe to run any time
 git commit && git push
-macos update        # installs it here, exactly as on every other Mac
+macos update        # installs it here, exactly as on every other Mac (and upgrades everything;
+                    # `macos update --no-upgrade` only pulls, migrates and applies)
 ```
 
 For the dotfiles repo it's the same: edit, commit and push in its dev clone, then run `macos update`.

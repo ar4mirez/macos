@@ -67,7 +67,7 @@ Steps that need you in the GUI (1Password sign-in, Tailscale's system extension,
 ```
 macos bootstrap   First-run setup of a new Mac
 macos apply       Converge apps, dotfiles, runtimes, settings and identity (--prune, --dry-run)
-macos upgrade     Upgrade declared packages and runtimes; list macOS updates
+macos upgrade     Upgrade Homebrew, App Store, mise, Neovim plugins and macOS
 macos apps        add | remove | adopt apps in a profile Brewfile
 macos addons      list | add | remove optional add-on profiles (e.g. gaming)
 macos dotfiles    link | unlink | status
@@ -75,7 +75,7 @@ macos defaults    apply | check
 macos identity    1Password SSH agent, git identities, commit signing
 macos brave       list | add | remove | adopt extensions for every Brave profile
 macos doctor      Report what is actually true, plus pending manual steps
-macos update      Pull engine + dotfiles, run migrations, apply
+macos update      Update everything: engine, dotfiles, migrations, apply, then upgrade
 macos uninstall   Unlink dotfiles, remove the engine (apps are left alone)
 macos dev         status | link | unlink: run your development clones on this Mac
 ```
@@ -108,7 +108,7 @@ macos apps adopt                         # declare brew installs no Brewfile lis
                                          # and hand manually installed apps to Homebrew
 macos apply                              # install anything declared but missing (never upgrades)
 macos apply --prune                      # also uninstall brew packages no Brewfile declares
-macos upgrade                            # upgrade declared packages + mise runtimes
+macos upgrade                            # upgrade everything installed (see Keeping it healthy)
 ```
 
 - **`apps add` and `apps remove`:** they edit the Brewfiles with `brew bundle add` and `brew bundle remove`, then install or uninstall just that package. Commit the change in `~/.dotfiles` yourself.
@@ -207,9 +207,20 @@ Until the agent answers, the pending list says what to do in 1Password. After th
 
 ```sh
 macos doctor      # what is actually true: security, apps, dotfiles, settings, identity, pending steps
-macos update      # pull engine (fast-forward) + dotfiles (rebase --autostash), run migrations, apply
+macos update      # everything, in one go (below); --no-upgrade stops after apply
 macos uninstall   # unlink dotfiles, restore the files they replaced, remove the engine
 ```
+
+- **`update`:** one command for the whole Mac, like Omarchy's update. It runs these steps in order:
+  1. Pull the engine (fast-forward) and the dotfiles (`rebase --autostash`).
+  2. Run migrations, then `macos apply`.
+  3. If apply succeeded, run `macos upgrade`.
+- **`upgrade`:** it refuses to start with less than 10 GB free (`MACOS_MIN_FREE_GB`), and keeps the Mac awake while it runs. It covers:
+  - **Homebrew:** upgrades what the Brewfiles declare and prunes the download cache. It lists dependencies nothing uses any more, and removes them only if you say yes.
+  - **App Store:** `mas upgrade`.
+  - **mise:** upgrades the runtimes with no release-age cooldown.
+  - **Neovim:** updates the lazy.nvim plugins.
+  - **macOS:** installs updates that need no restart. It asks before installing ones that restart the Mac, and `--yes` never installs those.
 
 - **`doctor`:**
   - It exits 1 only on real problems: FileVault off, declared apps missing, dotfiles not linked, broken commit signing, or the `claude-code` cask shadowing the native install.

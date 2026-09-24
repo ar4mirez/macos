@@ -1,9 +1,17 @@
 #!/usr/bin/env bash
-# macos:summary=Upgrade declared packages, mise runtimes, and list macOS updates
-# macos:usage=macos upgrade [--dry-run]
+# macos:summary=Upgrade everything: Homebrew, App Store, mise, Neovim plugins, macOS
+# macos:usage=macos upgrade [--dry-run] [--yes]
 #
-# Upgrades only what the active Brewfiles declare (plus their dependencies).
-# macOS updates are listed, never installed: they need a restart you choose.
+# Like Omarchy's update, one pass over everything installed:
+#   Homebrew    brew update, upgrade what the active Brewfiles declare, prune
+#               the download cache, then offer to remove unused dependencies
+#   App Store   mas upgrade, when any App Store app is installed
+#   mise        upgrade the runtimes now (no release-age cooldown)
+#   Neovim      update the lazy.nvim plugins
+#   macOS       install updates that need no restart; ask before installing
+#               the ones that restart the Mac
+# --yes asks nothing: unused dependencies are kept and restart-requiring
+# macOS updates are only listed. `macos update` runs this after applying.
 
 # shellcheck source=lib/common.sh
 . "${MACOS_ROOT:=$(cd -- "$(dirname -- "$0")/.." && pwd -P)}/lib/common.sh"
@@ -16,16 +24,34 @@ unset _lib
 while [ $# -gt 0 ]; do
   case "$1" in
     -n | --dry-run) MACOS_DRY_RUN=1 ;;
+    -y | --yes) MACOS_YES=1 ;;
     *) die "unknown option: $1 (see 'macos upgrade --help')" ;;
   esac
   shift
 done
-export MACOS_DRY_RUN
+export MACOS_DRY_RUN MACOS_YES
+
+# Free space an upgrade needs: macOS updates unpack several GB. Omarchy
+# refuses below 10 GiB too.
+: "${MACOS_MIN_FREE_GB:=10}"
 
 require_profile
 lock_acquire
 dry_run || log_to_file
 dry_run && say "Dry run: nothing will be changed."
+
+free_gb="$(df -g / 2>/dev/null | awk 'NR == 2 { print $4 }')"
+if [ -n "$free_gb" ] && [ "$free_gb" -lt "$MACOS_MIN_FREE_GB" ]; then
+  die "only ${free_gb} GB free; upgrading needs at least ${MACOS_MIN_FREE_GB} GB (free some space, or set MACOS_MIN_FREE_GB)"
+fi
+
+# Keep the Mac awake (and the display on) until this process exits.
+if ! dry_run && command -v caffeinate >/dev/null 2>&1; then
+  caffeinate -dims -w "$$" &
+  disown "$!" 2>/dev/null || true
+fi
+
+failed=""
 
 step "Homebrew"
 brew_env
@@ -37,7 +63,40 @@ if dry_run; then
 else
   sudo_preflight
   sudo_keepalive
-  brew bundle install --file="$MERGED_BREWFILE" --upgrade
+  if ! brew bundle install --file="$MERGED_BREWFILE" --upgrade; then
+    warn "some packages failed to upgrade (see above); continuing with the rest"
+    failed="$failed homebrew"
+  fi
+  # Old versions and downloads; never anything still installed.
+  run brew cleanup --quiet || warn "brew cleanup failed"
+fi
+# Dependencies nothing needs any more (Omarchy's orphan packages): shown,
+# and removed only when you say so.
+orphans="$(brew autoremove --dry-run 2>/dev/null | sed -n '/^==>/!p' | sed '/^$/d' || true)"
+if [ -n "$orphans" ]; then
+  say "Dependencies nothing uses any more:"
+  printf '%s\n' "$orphans" | sed 's/^/    /' >&2
+  if dry_run; then
+    skip "would ask before removing them"
+  elif [ "${MACOS_YES:-0}" = 1 ]; then
+    skip "kept (--yes asks nothing); 'macos upgrade' in a terminal offers to remove them"
+  elif confirm "Remove them?"; then
+    run brew autoremove --quiet
+    ok "unused dependencies removed"
+  else
+    skip "kept"
+  fi
+fi
+
+step "App Store"
+if command -v mas >/dev/null 2>&1 && [ -n "$(mas list 2>/dev/null)" ]; then
+  if dry_run; then
+    mas outdated >&2 || true
+  else
+    run mas upgrade || { warn "mas upgrade failed (signed in to the App Store?)"; failed="$failed appstore"; }
+  fi
+else
+  skip "no App Store apps installed"
 fi
 
 step "Runtimes (mise)"
@@ -45,13 +104,61 @@ if command -v mise >/dev/null 2>&1; then
   if dry_run; then
     mise outdated >&2 || true
   else
-    mise upgrade
+    # mise holds back releases younger than its cooldown; an upgrade you ask
+    # for should get today's versions (Omarchy's update does the same).
+    MISE_MINIMUM_RELEASE_AGE=0 run mise upgrade || { warn "mise upgrade failed"; failed="$failed mise"; }
   fi
 else
   skip "mise not installed"
 fi
 
+step "Neovim plugins"
+if command -v nvim >/dev/null 2>&1 && [ -f "${XDG_CONFIG_HOME:-$HOME/.config}/nvim/init.lua" ]; then
+  if run nvim --headless '+Lazy! update' +qa >/dev/null 2>&1; then
+    ok "plugins updated"
+  else
+    warn "Neovim plugin update failed"
+    failed="$failed neovim"
+  fi
+else
+  skip "no Neovim config"
+fi
+
 step "macOS"
-softwareupdate --list 2>&1 | sed 's/^/    /' >&2 || true
-skip "macOS updates are never installed automatically; use System Settings → General → Software Update"
+list="$(softwareupdate --list 2>&1 || true)"
+# "* Label: <label>" lines, each followed by a detail line whose Action is
+# "restart" when the update restarts the Mac.
+labels_now="$(awk '/^\* Label: / { sub(/^\* Label: /, ""); l = $0; next } l != "" { if ($0 !~ /Action: restart/) print l; l = "" }' <<<"$list")"
+labels_restart="$(awk '/^\* Label: / { sub(/^\* Label: /, ""); l = $0; next } l != "" { if ($0 ~ /Action: restart/) print l; l = "" }' <<<"$list")"
+if [ -z "$labels_now$labels_restart" ]; then
+  skip "macOS is up to date"
+else
+  if [ -n "$labels_now" ]; then
+    say "Updates that need no restart:"
+    printf '%s\n' "$labels_now" | sed 's/^/    /' >&2
+    while IFS= read -r label; do
+      [ -n "$label" ] || continue
+      run sudo softwareupdate --install "$label" || { warn "could not install $label"; failed="$failed macos"; }
+    done <<EOF
+$labels_now
+EOF
+  fi
+  if [ -n "$labels_restart" ]; then
+    say "Updates that restart the Mac:"
+    printf '%s\n' "$labels_restart" | sed 's/^/    /' >&2
+    if dry_run; then
+      skip "would ask before installing them"
+    elif [ "${MACOS_YES:-0}" = 1 ]; then
+      skip "not installed (--yes asks nothing); run 'macos upgrade' in a terminal, or use System Settings → General → Software Update"
+    elif confirm "Install them now? The Mac restarts when they finish; save your work first."; then
+      run sudo softwareupdate --install --all --restart
+    else
+      skip "not installed; 'macos upgrade' offers them again"
+    fi
+  fi
+fi
+
+if [ -n "$failed" ]; then
+  die "upgrade finished with errors in:$failed"
+fi
 ok "upgrade finished"

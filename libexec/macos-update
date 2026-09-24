@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
-# macos:summary=Pull engine and dotfiles, run migrations, then apply
-# macos:usage=macos update [--dry-run] [--yes]
+# macos:summary=Update everything: engine, dotfiles, migrations, apply, then upgrade all packages and macOS
+# macos:usage=macos update [--no-upgrade] [--dry-run] [--yes]
 #
-# The engine only fast-forwards (it is never edited in place). The dotfiles
-# repo is rebased with --autostash so uncommitted edits survive; a conflict
-# aborts the rebase and stops. After migrations, `macos apply` runs from
-# the freshly pulled engine.
+# One command for the whole Mac, like Omarchy's update. The engine only
+# fast-forwards (it is never edited in place). The dotfiles repo is rebased
+# with --autostash so uncommitted edits survive; a conflict aborts the
+# rebase and stops. After migrations, the freshly pulled engine runs
+# `macos apply`, then `macos upgrade` (Homebrew, App Store, mise, Neovim
+# plugins, macOS updates). --no-upgrade stops after apply.
 
 # shellcheck source=lib/common.sh
 . "${MACOS_ROOT:=$(cd -- "$(dirname -- "$0")/.." && pwd -P)}/lib/common.sh"
@@ -16,8 +18,10 @@ done
 unset _lib
 
 apply_args=()
+upgrade=1
 while [ $# -gt 0 ]; do
   case "$1" in
+    --no-upgrade) upgrade=0 ;;
     -n | --dry-run) MACOS_DRY_RUN=1; apply_args+=(--dry-run) ;;
     -y | --yes) MACOS_YES=1; apply_args+=(--yes) ;;
     *) die "unknown option: $1 (see 'macos update --help')" ;;
@@ -98,4 +102,10 @@ if [ "${_MACOS_DIED_OWNER:-}" = "$$" ]; then
   rm -f "$_MACOS_DIED_FLAG"
 fi
 unset _MACOS_DIED_FLAG _MACOS_DIED_OWNER
-exec "$MACOS_ROOT/bin/macos" apply ${apply_args[@]+"${apply_args[@]}"}
+if [ "$upgrade" = 0 ]; then
+  exec "$MACOS_ROOT/bin/macos" apply ${apply_args[@]+"${apply_args[@]}"}
+fi
+# Upgrading on top of a failed apply would build on a Mac that isn't in its
+# declared state; stop, as Omarchy's update does when its packages fail.
+"$MACOS_ROOT/bin/macos" apply ${apply_args[@]+"${apply_args[@]}"} || exit
+exec "$MACOS_ROOT/bin/macos" upgrade ${apply_args[@]+"${apply_args[@]}"}

@@ -19,7 +19,7 @@ fi
 SANDBOX="$(mktemp -d "${TMPDIR:-/tmp}/macos-test.XXXXXX")"
 trap 'rm -rf "$SANDBOX"' EXIT
 
-STUBBED_TOOLS="defaults killall osascript scutil sudo brew mas dockutil duti softwareupdate hidutil pmset gh op git curl xcode-select uname mise open ssh-add fdesetup csrutil ssh lipo"
+STUBBED_TOOLS="defaults killall osascript scutil sudo brew mas dockutil duti softwareupdate hidutil pmset gh op git curl xcode-select uname mise open ssh-add fdesetup csrutil ssh lipo caffeinate nvim"
 
 REAL_HOME="$HOME"
 export HOME="$SANDBOX/home"
@@ -844,7 +844,7 @@ t_upgrade() {
     grep -q '^mise upgrade' "$STUB_LOG" && grep -q '^softwareupdate --list' "$STUB_LOG" &&
     ! grep -q '^softwareupdate --install' "$STUB_LOG"
 }
-check "upgrade upgrades declared packages and runtimes, only lists macOS updates" t_upgrade
+check "upgrade upgrades declared packages and runtimes; no macOS update is installed when none is listed" t_upgrade
 
 t_upgrade_dry_run() {
   phase3_env
@@ -852,6 +852,62 @@ t_upgrade_dry_run() {
   grep -q '^brew outdated' "$STUB_LOG" && ! grep -qE '^brew (update|bundle install)|^mise upgrade' "$STUB_LOG"
 }
 check "upgrade --dry-run only reports" t_upgrade_dry_run
+
+t_upgrade_everything() {
+  phase3_env
+  mkdir -p "$HOME/.config/nvim" && : >"$HOME/.config/nvim/init.lua"
+  STUB_LOG_ENV=MISE_MINIMUM_RELEASE_AGE STUB_MAS_LIST_OUT="497799835 Xcode (16.0)" \
+    "$M" upgrade --yes >"$SANDBOX/o" 2>&1 || { cat "$SANDBOX/o"; return 1; }
+  local L="$STUB_LOG"
+  grep -q '^caffeinate -dims -w ' "$L" && grep -q '^brew cleanup --quiet' "$L" && grep -q '^mas upgrade' "$L" &&
+    grep -qF 'mise upgrade [MISE_MINIMUM_RELEASE_AGE=0]' "$L" &&
+    grep -qF 'nvim --headless +Lazy! update +qa' "$L" && grep -q 'upgrade finished' "$SANDBOX/o" || { cat "$L" "$SANDBOX/o"; return 1; }
+}
+check "upgrade covers Homebrew (+cleanup), App Store, mise without cooldown, Neovim plugins; keeps the Mac awake" t_upgrade_everything
+
+SU_LIST='Software Update found the following new or updated software:
+* Label: Safari19.1-19.1
+	Title: Safari, Version: 19.1, Size: 150000KiB, Recommended: YES,
+* Label: macOS Sequoia 27.1-27B55
+	Title: macOS 27.1, Version: 27.1, Size: 7000000KiB, Recommended: YES, Action: restart,'
+
+t_upgrade_macos_yes() {
+  phase3_env
+  STUB_SOFTWAREUPDATE___LIST_OUT="$SU_LIST" "$M" upgrade --yes >"$SANDBOX/o" 2>&1 || { cat "$SANDBOX/o"; return 1; }
+  grep -qx 'sudo softwareupdate --install Safari19.1-19.1' "$STUB_LOG" && ! grep -q -- '--restart' "$STUB_LOG" &&
+    grep -q 'not installed (--yes asks nothing)' "$SANDBOX/o" || { cat "$STUB_LOG" "$SANDBOX/o"; return 1; }
+}
+check "upgrade installs macOS updates that need no restart; --yes never installs restarting ones" t_upgrade_macos_yes
+
+t_upgrade_macos_ask() {
+  phase3_env
+  printf 'y\n' >"$SANDBOX/answers"
+  MACOS_TTY="$SANDBOX/answers" STUB_SOFTWAREUPDATE___LIST_OUT="$SU_LIST" "$M" upgrade >"$SANDBOX/o" 2>&1 || { cat "$SANDBOX/o"; return 1; }
+  grep -qx 'sudo softwareupdate --install --all --restart' "$STUB_LOG" || { cat "$STUB_LOG"; return 1; }
+  : >"$STUB_LOG"; printf 'n\n' >"$SANDBOX/answers"
+  MACOS_TTY="$SANDBOX/answers" STUB_SOFTWAREUPDATE___LIST_OUT="$SU_LIST" "$M" upgrade >"$SANDBOX/o" 2>&1 || { cat "$SANDBOX/o"; return 1; }
+  ! grep -q -- '--restart' "$STUB_LOG" && grep -q "offers them again" "$SANDBOX/o"
+}
+check "upgrade asks before restarting macOS updates, and installs them only on yes" t_upgrade_macos_ask
+
+t_upgrade_orphans() {
+  phase3_env
+  local OUT='==> Would autoremove 1 unneeded formula:
+libfoo'
+  STUB_BREW_AUTOREMOVE_OUT="$OUT" "$M" upgrade --yes >"$SANDBOX/o" 2>&1 || { cat "$SANDBOX/o"; return 1; }
+  grep -q '    libfoo' "$SANDBOX/o" && ! grep -q '^brew autoremove --quiet' "$STUB_LOG" || { cat "$SANDBOX/o"; return 1; }
+  : >"$STUB_LOG"; printf 'y\n' >"$SANDBOX/answers"
+  MACOS_TTY="$SANDBOX/answers" STUB_BREW_AUTOREMOVE_OUT="$OUT" "$M" upgrade >"$SANDBOX/o" 2>&1 || { cat "$SANDBOX/o"; return 1; }
+  grep -q '^brew autoremove --quiet' "$STUB_LOG"
+}
+check "upgrade lists unused dependencies and removes them only when asked" t_upgrade_orphans
+
+t_upgrade_low_space() {
+  phase3_env
+  MACOS_MIN_FREE_GB=99999999 "$M" upgrade --yes >"$SANDBOX/o" 2>&1 && return 1
+  grep -q 'upgrading needs at least 99999999 GB' "$SANDBOX/o" && ! grep -q '^brew update' "$STUB_LOG"
+}
+check "upgrade refuses to start without enough free disk space" t_upgrade_low_space
 
 # ---------------------------------------------------------------------------
 section "apps"
@@ -1712,6 +1768,24 @@ t_update_dry_run() {
     grep -q 'would run: .*100.sh' "$SANDBOX/o" && grep -q 'apply finished (dry run)' "$SANDBOX/o"
 }
 check "update --dry-run only previews" t_update_dry_run
+
+t_update_upgrades() {
+  migrations_env
+  "$M" update --yes >"$SANDBOX/o" 2>&1 || { cat "$SANDBOX/o"; return 1; }
+  grep -q 'apply finished' "$SANDBOX/o" && grep -q 'upgrade finished' "$SANDBOX/o" &&
+    grep -q "^brew bundle install --file=$MACOS_STATE/Brewfile --upgrade" "$STUB_LOG" || { cat "$SANDBOX/o"; return 1; }
+  : >"$STUB_LOG"
+  "$M" update --yes --no-upgrade >"$SANDBOX/o" 2>&1 || { cat "$SANDBOX/o"; return 1; }
+  grep -q 'apply finished' "$SANDBOX/o" && ! grep -q 'upgrade finished' "$SANDBOX/o" && ! grep -q '^brew update' "$STUB_LOG"
+}
+check "update applies, then upgrades everything; --no-upgrade stops after apply" t_update_upgrades
+
+t_update_no_upgrade_after_failed_apply() {
+  migrations_env
+  STUB_BREW_BUNDLE_CHECK_RC=1 STUB_BREW_BUNDLE_INSTALL_RC=1 "$M" update --yes >"$SANDBOX/o" 2>&1 && return 1
+  grep -q 'apply finished with errors' "$SANDBOX/o" && ! grep -q '^brew update' "$STUB_LOG" && ! grep -q '==> Homebrew' "$SANDBOX/o"
+}
+check "update does not upgrade on top of a failed apply" t_update_no_upgrade_after_failed_apply
 
 t_bootstrap_marks_migrations() {
   bootstrap_env
