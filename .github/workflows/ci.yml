@@ -1,0 +1,17 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    # Lint and unit tests only; end-to-end runs happen in a macOS VM.
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install test dependencies
+        run: brew install bash shellcheck
+      - name: Run tests
+        run: ./test/run.sh
