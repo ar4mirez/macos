@@ -6,3 +6,7 @@
 : "${SOCKETFILTERFW:=/usr/libexec/ApplicationFirewall/socketfilterfw}"
 : "${ACTIVATE_SETTINGS:=/System/Library/PrivateFrameworks/SystemAdministration.framework/Resources/activateSettings}"
 : "${OP_SSH_SIGN:=/Applications/1Password.app/Contents/MacOS/op-ssh-sign}"
+
+# Files outside $HOME that the engine manages; overridable for tests.
+: "${PAM_SUDO_LOCAL:=/etc/pam.d/sudo_local}"
+: "${HOMEBREW_PREFIX:=/opt/homebrew}"

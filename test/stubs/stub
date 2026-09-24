@@ -13,6 +13,27 @@ var="$(printf '%s' "$tool" | tr '[:lower:]-' '[:upper:]_')"
 
 printf '%s %s\n' "$tool" "$*" >>"${STUB_LOG:-/dev/null}"
 
+# uname answers per flag, so boot.sh's platform check can be exercised.
+if [ "$tool" = uname ]; then
+  case "${1:-}" in
+    -s) echo "${STUB_UNAME_S:-Darwin}" ;;
+    -m) echo "${STUB_UNAME_M:-arm64}" ;;
+    *) echo "${STUB_UNAME_S:-Darwin}" ;;
+  esac
+  exit 0
+fi
+
+# brew reports analytics as disabled whenever HOMEBREW_NO_ANALYTICS is set,
+# regardless of the stored setting; mimic that so tests catch being fooled.
+if [ "$tool" = brew ] && [ "${1:-} ${2:-}" = "analytics state" ]; then
+  if [ -n "${HOMEBREW_NO_ANALYTICS:-}" ] || [ -n "${STUB_BREW_ANALYTICS_OFF:-}" ]; then
+    echo "InfluxDB analytics are disabled."
+  else
+    echo "InfluxDB analytics are enabled."
+  fi
+  exit 0
+fi
+
 out_var="STUB_${var}_OUT"
 rc_var="STUB_${var}_RC"
 

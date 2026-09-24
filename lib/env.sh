@@ -30,3 +30,20 @@ fi
 : "${MACOS_PROFILE:=}"
 
 export MACOS_STATE MACOS_MACHINE_ENV MACOS_DOTFILES MACOS_PROFILE
+
+# machine_env_set <KEY> <value> — persist a MACOS_* setting for this machine,
+# keeping the other keys. Needs lib/run.sh (dry-run) at call time.
+machine_env_set() {
+  local key="$1" val="$2" rest=""
+  if [ -f "$MACOS_MACHINE_ENV" ]; then
+    rest="$(grep -v "^$key=" "$MACOS_MACHINE_ENV" || true)"
+    if grep -qx "$key=\"$val\"" "$MACOS_MACHINE_ENV"; then
+      return 0
+    fi
+  fi
+  {
+    [ -n "$rest" ] && printf '%s\n' "$rest"
+    printf '%s="%s"\n' "$key" "$val"
+  } | write_file "$MACOS_MACHINE_ENV"
+  export "$key=$val"
+}

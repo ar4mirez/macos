@@ -8,7 +8,7 @@ A small, declarative Bash engine that sets up and maintains my Macs. It covers:
 - **Identity:** the 1Password SSH agent, SSH commit signing, and per-org git identities.
 - **Profiles:** `base` plus one of `work` or `personal`.
 
-> **Status: Phase 1 (scaffold).** The command surface, libraries and test harness exist. Most commands are still placeholders and exit with code `2`. See [Roadmap](#roadmap).
+> **Status: Phase 2 (bootstrap).** `boot.sh` and `macos bootstrap` work through the app install. Later bootstrap steps and the other commands are still placeholders that exit with code `2`. See [Roadmap](#roadmap).
 
 ## Engine vs. data
 
@@ -31,11 +31,28 @@ This repo is only the **engine**. It holds no personal data. Everything personal
 | `~/.dotfiles` | you (private repo) | Your apps, settings and configs. Edit and commit here. |
 | `~/.local/state/macos` | generated | `machine.env`, merged Brewfile, logs, backups, pending manual steps |
 
-## Install (coming in Phase 2)
+## Install
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/ar4mirez/macos/main/boot.sh | bash
+# or non-interactively:
+curl -fsSL https://raw.githubusercontent.com/ar4mirez/macos/main/boot.sh | bash -s -- --yes --profile work --hostname "Studio"
 ```
+
+`boot.sh` sets up the prerequisites and then hands over to `macos bootstrap`:
+1. Installs the Xcode Command Line Tools and Homebrew if they're missing.
+2. Clones this engine to `~/.local/share/macos`.
+
+`macos bootstrap` then runs these steps. Each is idempotent, so re-running resumes:
+
+1. **Profile and computer name:** asks on the terminal, then saves them to `~/.local/state/macos/machine.env`.
+2. **Prerequisites:** installs `gh`.
+3. **Security baseline:** Touch ID for `sudo` (via `/etc/pam.d/sudo_local`, which survives OS updates), firewall and stealth mode, Homebrew analytics off, hostname.
+4. **GitHub:** logs `gh` in, or adds missing scopes (`admin:public_key`, `admin:ssh_signing_key`). Git uses HTTPS until the 1Password SSH agent is verified.
+5. **Dotfiles:** clones the private repo over HTTPS, with `gh` as the only credential helper, and turns on its gitleaks hook.
+6. **Apps:** merges the base and profile Brewfiles and runs `brew bundle install --no-upgrade`. Steps that need you in the GUI (e.g. Tailscale's system extension) are recorded as pending.
+
+Use `--dry-run` to see every change without making it.
 
 ## Commands
 
@@ -70,7 +87,7 @@ Conventions:
 ## Roadmap
 
 1. **Scaffold:** dispatcher, libraries, test harness, CI. *(done)*
-2. **Bootstrap:** `boot.sh`, profile selection, security baseline, `gh` auth, HTTPS dotfiles clone, Brewfile install.
+2. **Bootstrap:** `boot.sh`, profile selection, security baseline, `gh` auth, HTTPS dotfiles clone, Brewfile install. *(done)*
 3. **Apps:** `apply` / `--prune` / `upgrade` / `apps add|remove|adopt`.
 4. **Dotfiles:** Stow link, unlink and status, with backup of conflicting files.
 5. **Defaults:** the `defaults.conf` engine and imperative steps (Dock, Caps Lock, browser).

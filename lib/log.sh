@@ -22,5 +22,9 @@ log_to_file() {
   mkdir -p "$dir"
   MACOS_LOG="$dir/$(date +%Y%m%d-%H%M%S)-${0##*/}.log"
   export MACOS_LOG
+  # Keep the real terminal on fds 4/5 for interactive tools (gh, sudo) that
+  # refuse to prompt when stdout is a pipe.
+  exec 4>&1 5>&2
+  _MACOS_OUT_FD=4 _MACOS_ERR_FD=5
   exec > >(tee -a "$MACOS_LOG") 2> >(tee -a "$MACOS_LOG" >&2)
 }
