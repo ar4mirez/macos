@@ -33,9 +33,14 @@ _macos_run_exit_hooks() {
   fi
 }
 
+# Report the first failure only: with errtrace the trap fires again in every
+# calling function as the error unwinds.
 _macos_on_err() {
   local rc=$?
-  warn "failed (exit $rc) during: ${MACOS_STEP:-${0##*/}} [${BASH_SOURCE[1]:-?}:${BASH_LINENO[0]:-?}]"
+  if [ -z "${_MACOS_ERR_REPORTED:-}" ]; then
+    _MACOS_ERR_REPORTED=1
+    warn "failed (exit $rc) during: ${MACOS_STEP:-${0##*/}} [${BASH_SOURCE[1]:-?}:${BASH_LINENO[0]:-?}]"
+  fi
   return "$rc"
 }
 

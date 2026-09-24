@@ -8,7 +8,7 @@
 
 # shellcheck source=lib/common.sh
 . "${MACOS_ROOT:=$(cd -- "$(dirname -- "$0")/.." && pwd -P)}/lib/common.sh"
-for _lib in run prompt lock pending sudo security brew repo gh; do
+for _lib in run prompt lock pending sudo security brew repo gh profile; do
   # shellcheck source=/dev/null
   . "$MACOS_ROOT/lib/$_lib.sh"
 done
@@ -90,16 +90,10 @@ fi
 
 # --- 6. Apps ------------------------------------------------------------------
 step "Apps"
-MERGED_BREWFILE="$MACOS_STATE/Brewfile"
-if dry_run; then
-  MERGED_BREWFILE="$(mktemp "${TMPDIR:-/tmp}/macos-Brewfile.XXXXXX")"
-  on_exit 'rm -f "$MERGED_BREWFILE"'
-fi
 if dry_run && [ ! -d "$MACOS_DOTFILES/macos/profiles/base" ]; then
   skip "dotfiles not cloned yet; would merge and install the $profile Brewfiles"
 else
-  # shellcheck disable=SC2046
-  brew_merge "$MERGED_BREWFILE" $(profile_brewfiles "$profile")
+  merge_active_brewfile
   ok "merged Brewfile: $MERGED_BREWFILE"
   brew_bundle_install "$MERGED_BREWFILE"
   # pam-reattach may have just been installed; re-render sudo_local for it.

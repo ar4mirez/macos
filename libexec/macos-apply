@@ -1,8 +1,53 @@
 #!/usr/bin/env bash
 # macos:summary=Converge apps, dotfiles, defaults and runtimes to the declared state
-# macos:usage=macos apply [--prune] [--dry-run]
+# macos:usage=macos apply [--prune] [--dry-run] [--yes]
+#
+# Idempotent: installs what is missing and never upgrades (see `macos
+# upgrade`), so a second run changes nothing. --prune also uninstalls brew
+# formulae, casks and taps that no active Brewfile declares, after asking.
 
 # shellcheck source=lib/common.sh
 . "${MACOS_ROOT:=$(cd -- "$(dirname -- "$0")/.." && pwd -P)}/lib/common.sh"
+for _lib in run prompt lock sudo brew profile; do
+  # shellcheck source=/dev/null
+  . "$MACOS_ROOT/lib/$_lib.sh"
+done
+unset _lib
 
-not_implemented 3
+prune=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --prune) prune=1 ;;
+    -n | --dry-run) MACOS_DRY_RUN=1 ;;
+    -y | --yes) MACOS_YES=1 ;;
+    *) die "unknown option: $1 (see 'macos apply --help')" ;;
+  esac
+  shift
+done
+export MACOS_DRY_RUN MACOS_YES
+
+require_profile
+lock_acquire
+dry_run || log_to_file
+dry_run && say "Dry run: nothing will be changed."
+
+step "Apps ($MACOS_PROFILE profile)"
+brew_env
+merge_active_brewfile
+
+adoptable="$(brew_adoptable "$MERGED_BREWFILE")"
+if [ -n "$adoptable" ]; then
+  warn "installed by hand, so Homebrew can't install them over the top: $(echo "$adoptable" | tr '\n' ' ')"
+  warn "run 'macos apps adopt' to hand them to Homebrew"
+fi
+
+brew_bundle_install "$MERGED_BREWFILE"
+
+if [ "$prune" = 1 ]; then
+  step "Prune"
+  brew_prune "$MERGED_BREWFILE"
+fi
+
+step "Not built yet"
+skip "dotfiles link and mise runtimes arrive in phase 4, defaults in phase 5"
+ok "apply finished"

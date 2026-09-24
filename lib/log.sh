@@ -10,10 +10,17 @@ else
 fi
 
 say()  { printf '%s==>%s %s\n' "$_C_BLUE" "$_C_RESET" "$*" >&2; }
-ok()   { printf '%s ok%s %s\n' "$_C_GREEN" "$_C_RESET" "$*" >&2; }
+# Under --dry-run nothing actually happened, so results are marked as such.
+ok() {
+  if [ "${MACOS_DRY_RUN:-0}" = 1 ]; then
+    printf '%s  ~%s %s (dry run)\n' "$_C_DIM" "$_C_RESET" "$*" >&2
+  else
+    printf '%s ok%s %s\n' "$_C_GREEN" "$_C_RESET" "$*" >&2
+  fi
+}
 skip() { printf '%s  -%s %s\n' "$_C_DIM" "$_C_RESET" "$*" >&2; }
 warn() { printf '%s  !%s %s\n' "$_C_YELLOW" "$_C_RESET" "$*" >&2; }
-die()  { printf '%s  x%s %s\n' "$_C_RED" "$_C_RESET" "$*" >&2; exit 1; }
+die()  { _MACOS_ERR_REPORTED=1; printf '%s  x%s %s\n' "$_C_RED" "$_C_RESET" "$*" >&2; exit 1; }
 
 # log_to_file — mirror this process's stdout/stderr into a timestamped log
 # under $MACOS_STATE/logs. Call once, near the start of a mutating command.

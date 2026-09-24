@@ -10,3 +10,6 @@
 # Files outside $HOME that the engine manages; overridable for tests.
 : "${PAM_SUDO_LOCAL:=/etc/pam.d/sudo_local}"
 : "${HOMEBREW_PREFIX:=/opt/homebrew}"
+
+# Where .app bundles installed outside Homebrew live (checked by `apps adopt`).
+: "${MACOS_APPLICATIONS_DIRS:=/Applications $HOME/Applications}"

@@ -59,13 +59,110 @@ profile_brewfiles() {
   fi
 }
 
+# merge_active_brewfile — regenerate the merged Brewfile for this machine's
+# profile into $MERGED_BREWFILE ($MACOS_STATE/Brewfile, or a temp file under
+# --dry-run so a preview never writes state).
+merge_active_brewfile() {
+  MERGED_BREWFILE="$MACOS_STATE/Brewfile"
+  if dry_run; then
+    MERGED_BREWFILE="$(mktemp "${TMPDIR:-/tmp}/macos-Brewfile.XXXXXX")"
+    on_exit "rm -f '$MERGED_BREWFILE'"
+  fi
+  # shellcheck disable=SC2046
+  brew_merge "$MERGED_BREWFILE" $(profile_brewfiles "$MACOS_PROFILE")
+}
+
+# brew_missing <Brewfile> — "type name" per declared entry not installed yet.
+brew_missing() {
+  # `bundle check` exits 1 exactly when something is missing; that is the
+  # answer we are reading, not an error.
+  { brew bundle check --file="$1" --verbose --no-upgrade 2>/dev/null || true; } |
+    sed -n 's/^→ \([A-Za-z]*\) \([^ ]*\) needs to be installed.*/\1 \2/p' |
+    tr '[:upper:]' '[:lower:]'
+}
+
 # brew_bundle_install <Brewfile> — install what is missing; never upgrades
 # (that is `macos upgrade`), so a second run changes nothing.
 brew_bundle_install() {
-  if dry_run; then
-    say "Missing from $1:"
-    brew bundle check --file="$1" --verbose --no-upgrade >&2 || true
+  if brew bundle check --file="$1" --no-upgrade >/dev/null 2>&1; then
+    skip "all declared apps are installed"
     return 0
   fi
+  if dry_run; then
+    say "Would install:"
+    brew_missing "$1" | sed 's/^/    /' >&2
+    return 0
+  fi
+  if command -v sudo_keepalive >/dev/null 2>&1; then
+    sudo_preflight
+    sudo_keepalive
+  fi
   brew bundle install --file="$1" --no-upgrade
+}
+
+# Pruning only ever touches formulae, casks and taps. Homebrew would also run
+# these cleaners as soon as a Brewfile had one entry of their type, removing
+# e.g. every App Store app or global npm tool not listed.
+BREW_CLEANUP_ENV=(
+  HOMEBREW_BUNDLE_CLEANUP_NO_MAS=1 HOMEBREW_BUNDLE_CLEANUP_NO_VSCODE=1
+  HOMEBREW_BUNDLE_CLEANUP_NO_NPM=1 HOMEBREW_BUNDLE_CLEANUP_NO_UV=1
+  HOMEBREW_BUNDLE_CLEANUP_NO_CARGO=1 HOMEBREW_BUNDLE_CLEANUP_NO_GO=1
+  HOMEBREW_BUNDLE_CLEANUP_NO_KREW=1 HOMEBREW_BUNDLE_CLEANUP_NO_FLATPAK=1
+  HOMEBREW_BUNDLE_CLEANUP_NO_WINGET=1
+)
+
+# brew_prune <Brewfile> — uninstall brew formulae/casks/taps the Brewfile does
+# not list, after showing them and asking. Without --force, `brew bundle
+# cleanup` only reports (exit 1 = something to remove); stdin is detached so
+# it can never prompt and act on its own.
+brew_prune() {
+  local file="$1" preview rc=0
+  preview="$(env "${BREW_CLEANUP_ENV[@]}" brew bundle cleanup --file="$file" </dev/null 2>&1)" || rc=$?
+  if [ "$rc" -eq 0 ]; then
+    skip "nothing to prune"
+    return 0
+  fi
+  if ! printf '%s\n' "$preview" | grep -q '^Would '; then
+    printf '%s\n' "$preview" >&2
+    die "brew bundle cleanup failed (exit $rc)"
+  fi
+  say "Not declared in any active Brewfile:"
+  printf '%s\n' "$preview" | grep -v '^Run `brew bundle cleanup' | sed 's/^/    /' >&2
+  if dry_run; then
+    return 0
+  fi
+  warn "This also resets Homebrew's tap trust store to what the Brewfiles declare."
+  if ! confirm "Uninstall these now?"; then
+    skip "prune cancelled; nothing removed"
+    return 0
+  fi
+  env "${BREW_CLEANUP_ENV[@]}" brew bundle cleanup --force --file="$file"
+  ok "pruned"
+}
+
+# cask_app_names <cask> — .app bundle names a cask installs.
+cask_app_names() {
+  brew info --cask --json=v2 "$1" 2>/dev/null | jq -r '
+    .casks[0].artifacts[]? | objects | .app? // empty | .[]
+    | if type == "string" then . else (.target? // empty) end' 2>/dev/null |
+    sed 's#.*/##'
+}
+
+# brew_adoptable <Brewfile> — declared casks that are not installed by brew
+# but whose app already exists (installed by hand); `brew bundle install`
+# would fail on these with "It seems there is already an App".
+brew_adoptable() {
+  local type name app dir
+  brew_missing "$1" | while read -r type name; do
+    [ "$type" = cask ] || continue
+    for app in $(cask_app_names "$name" | tr ' ' '\001'); do
+      app="$(printf '%s' "$app" | tr '\001' ' ')"
+      for dir in $MACOS_APPLICATIONS_DIRS; do
+        if [ -d "$dir/$app" ]; then
+          echo "$name"
+          continue 3
+        fi
+      done
+    done
+  done
 }

@@ -4,14 +4,26 @@
 # touches the system.
 #
 #   STUB_LOG            file that receives "<tool> <args...>" per call
+#   STUB_LOG_ENV        space-separated variable names to append to each
+#                       logged line as [NAME=value] when set
 #   STUB_<TOOL>_OUT     text to print on stdout (tool name uppercased, - → _)
 #   STUB_<TOOL>_RC      exit code (default 0; `defaults read` defaults to 1,
 #                       i.e. "key does not exist")
+# OUT/RC can be narrowed to the first one to three arguments, most specific
+# first: STUB_BREW_BUNDLE_CHECK_RC, then STUB_BREW_BUNDLE_RC, then
+# STUB_BREW_RC. Arguments are uppercased with non-alphanumerics → _
+# (so `info --cask` is STUB_BREW_INFO___CASK_OUT).
 
 tool="${0##*/}"
 var="$(printf '%s' "$tool" | tr '[:lower:]-' '[:upper:]_')"
 
-printf '%s %s\n' "$tool" "$*" >>"${STUB_LOG:-/dev/null}"
+line="$tool $*"
+for _e in ${STUB_LOG_ENV:-}; do
+  if [ -n "${!_e:-}" ]; then
+    line="$line [$_e=${!_e}]"
+  fi
+done
+printf '%s\n' "$line" >>"${STUB_LOG:-/dev/null}"
 
 # uname answers per flag, so boot.sh's platform check can be exercised.
 if [ "$tool" = uname ]; then
@@ -34,8 +46,24 @@ if [ "$tool" = brew ] && [ "${1:-} ${2:-}" = "analytics state" ]; then
   exit 0
 fi
 
-out_var="STUB_${var}_OUT"
-rc_var="STUB_${var}_RC"
+_up() { printf '%s' "$1" | tr '[:lower:]' '[:upper:]' | tr -c 'A-Z0-9' '_'; }
+a1="$(_up "${1:-}")"
+a2="$(_up "${2:-}")"
+a3="$(_up "${3:-}")"
+
+# pick <suffix> — name of the most specific STUB_* variable that is set.
+pick() {
+  local v
+  for v in "STUB_${var}_${a1}_${a2}_${a3}_$1" "STUB_${var}_${a1}_${a2}_$1" "STUB_${var}_${a1}_$1" "STUB_${var}_$1"; do
+    if [ -n "${!v+x}" ]; then
+      echo "$v"
+      return
+    fi
+  done
+  echo "STUB_${var}_$1"
+}
+out_var="$(pick OUT)"
+rc_var="$(pick RC)"
 
 if [ -n "${!out_var:-}" ]; then
   printf '%s\n' "${!out_var}"

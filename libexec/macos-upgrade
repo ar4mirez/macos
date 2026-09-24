@@ -1,8 +1,57 @@
 #!/usr/bin/env bash
 # macos:summary=Upgrade declared packages, mise runtimes, and list macOS updates
 # macos:usage=macos upgrade [--dry-run]
+#
+# Upgrades only what the active Brewfiles declare (plus their dependencies).
+# macOS updates are listed, never installed: they need a restart you choose.
 
 # shellcheck source=lib/common.sh
 . "${MACOS_ROOT:=$(cd -- "$(dirname -- "$0")/.." && pwd -P)}/lib/common.sh"
+for _lib in run prompt lock sudo brew profile; do
+  # shellcheck source=/dev/null
+  . "$MACOS_ROOT/lib/$_lib.sh"
+done
+unset _lib
 
-not_implemented 3
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -n | --dry-run) MACOS_DRY_RUN=1 ;;
+    *) die "unknown option: $1 (see 'macos upgrade --help')" ;;
+  esac
+  shift
+done
+export MACOS_DRY_RUN
+
+require_profile
+lock_acquire
+dry_run || log_to_file
+dry_run && say "Dry run: nothing will be changed."
+
+step "Homebrew"
+brew_env
+merge_active_brewfile
+run brew update --quiet
+if dry_run; then
+  say "Outdated:"
+  brew outdated --verbose >&2 || true
+else
+  sudo_preflight
+  sudo_keepalive
+  brew bundle install --file="$MERGED_BREWFILE" --upgrade
+fi
+
+step "Runtimes (mise)"
+if command -v mise >/dev/null 2>&1; then
+  if dry_run; then
+    mise outdated >&2 || true
+  else
+    mise upgrade
+  fi
+else
+  skip "mise not installed"
+fi
+
+step "macOS"
+softwareupdate --list 2>&1 | sed 's/^/    /' >&2 || true
+skip "macOS updates are never installed automatically; use System Settings → General → Software Update"
+ok "upgrade finished"

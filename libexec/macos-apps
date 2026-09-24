@@ -1,8 +1,210 @@
 #!/usr/bin/env bash
 # macos:summary=Add, remove or adopt apps in a profile Brewfile
-# macos:usage=macos apps add|remove|adopt [<name>] [--cask] [--profile <p>] [--dry-run]
+# macos:usage=macos apps add|remove|adopt [<name>] [--cask|--formula] [--profile <p>] [--no-install|--keep-installed] [--dry-run] [--yes]
+#
+#   add <name>      declare it in a profile Brewfile (default: this Mac's
+#                   profile; use --profile base for every Mac), then install it
+#   remove <name>   drop it from every Brewfile declaring it (or only
+#                   --profile's), then uninstall it unless another active
+#                   profile still declares it or --keep-installed is given
+#   adopt           declare brew installs no Brewfile lists yet, and hand
+#                   declared apps that were installed by hand over to Homebrew
+#
+# Edits land in the dotfiles repo; commit them there.
 
 # shellcheck source=lib/common.sh
 . "${MACOS_ROOT:=$(cd -- "$(dirname -- "$0")/.." && pwd -P)}/lib/common.sh"
+for _lib in run prompt lock sudo brew profile; do
+  # shellcheck source=/dev/null
+  . "$MACOS_ROOT/lib/$_lib.sh"
+done
+unset _lib
 
-not_implemented 3
+action="${1:-}"
+[ -n "$action" ] || die "usage: $(sed -n 's/^# macos:usage=//p' "$0")"
+shift
+name="" type="" target_profile="" install=1 keep_installed=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --cask) type=cask ;;
+    --formula) type=brew ;;
+    --profile) target_profile="${2:?--profile needs a value}"; shift ;;
+    --profile=*) target_profile="${1#*=}" ;;
+    --no-install) install=0 ;;
+    --keep-installed) keep_installed=1 ;;
+    -n | --dry-run) MACOS_DRY_RUN=1 ;;
+    -y | --yes) MACOS_YES=1 ;;
+    -*) die "unknown option: $1 (see 'macos apps --help')" ;;
+    *)
+      [ -z "$name" ] || die "only one name at a time (got '$name' and '$1')"
+      name="$1"
+      ;;
+  esac
+  shift
+done
+export MACOS_DRY_RUN MACOS_YES
+
+require_profile
+brew_env
+lock_acquire
+dry_run && say "Dry run: nothing will be changed."
+
+brew_flag() { if [ "$1" = cask ]; then echo --cask; else echo --formula; fi; }
+
+commit_hint() {
+  dry_run && return 0
+  if [ -n "$(git -C "$MACOS_DOTFILES" status --porcelain -- macos 2>/dev/null)" ]; then
+    say "Commit the change in $MACOS_DOTFILES:"
+    printf '    git -C %s commit -am "%s"\n' "$MACOS_DOTFILES" "$1" >&2
+  fi
+}
+
+# detect_type <name> — set $type to brew or cask from what Homebrew knows.
+# (Sets a variable rather than printing, so `die` runs in this shell.)
+detect_type() {
+  local is_formula=0 is_cask=0
+  brew info --formula "$1" >/dev/null 2>&1 && is_formula=1
+  brew info --cask "$1" >/dev/null 2>&1 && is_cask=1
+  case "$is_formula$is_cask" in
+    10) type=brew ;;
+    01) type=cask ;;
+    11) die "'$1' is both a formula and a cask; pass --formula or --cask" ;;
+    *) die "Homebrew has no formula or cask named '$1'" ;;
+  esac
+}
+
+apps_add() {
+  local profile="${target_profile:-$MACOS_PROFILE}" file where
+  [ -n "$name" ] || die "usage: macos apps add <name> [--cask|--formula] [--profile <p>]"
+  profile_exists "$profile" || die "no profile '$profile' in $(profiles_dir)"
+  [ -n "$type" ] || detect_type "$name"
+  file="$(profiles_dir)/$profile/Brewfile"
+
+  where="$(declared_in "$name" "$type")"
+  if printf '%s\n' "$where" | grep -qx "$profile $type"; then
+    skip "$type \"$name\" is already declared in $profile"
+  elif [ "$profile" != base ] && printf '%s\n' "$where" | grep -qx "base $type"; then
+    die "$type \"$name\" is already declared in base, which every profile includes"
+  else
+    [ -f "$file" ] || printf '# %s — layered on top of base.\n' "$profile" | write_file "$file"
+    # brew bundle add validates the name and appends it with a description.
+    run brew bundle add --file="$file" "$(brew_flag "$type")" "$name"
+    ok "declared $type \"$name\" in $profile"
+  fi
+
+  if [ "$install" = 1 ]; then
+    if printf '%s\n' "$(active_profiles)" | grep -qx "$profile"; then
+      if brew list "$(brew_flag "$type")" "$name" >/dev/null 2>&1; then
+        skip "$name already installed"
+      else
+        run brew install "$(brew_flag "$type")" "$name"
+        ok "installed $name"
+      fi
+    else
+      skip "not installing: $profile is not this Mac's profile ($MACOS_PROFILE)"
+    fi
+  fi
+  commit_hint "Add $name to $profile"
+}
+
+apps_remove() {
+  local where profile t removed_from="" still_active=""
+  [ -n "$name" ] || die "usage: macos apps remove <name> [--profile <p>] [--keep-installed]"
+  where="$(declared_in "$name" "$type")"
+  [ -n "$where" ] || die "'$name' is not declared in any profile Brewfile"
+
+  while read -r profile t; do
+    if [ -n "$target_profile" ] && [ "$profile" != "$target_profile" ]; then
+      continue
+    fi
+    run brew bundle remove --file="$(profiles_dir)/$profile/Brewfile" "$(brew_flag "$t")" "$name"
+    ok "removed $t \"$name\" from $profile"
+    removed_from="$removed_from $profile"
+    type="$t"
+  done <<<"$where"
+  [ -n "$removed_from" ] || die "'$name' is not declared in profile '$target_profile' (declared in: $(echo "$where" | cut -d' ' -f1 | tr '\n' ' '))"
+
+  # Still wanted on this Mac through another active profile?
+  while read -r profile t; do
+    case " $removed_from " in *" $profile "*) continue ;; esac
+    if printf '%s\n' "$(active_profiles)" | grep -qx "$profile"; then
+      still_active="$profile"
+    fi
+  done <<<"$where"
+
+  if [ "$keep_installed" = 1 ]; then
+    skip "keeping $name installed (--keep-installed)"
+  elif [ -n "$still_active" ]; then
+    skip "keeping $name installed: still declared in $still_active"
+  elif ! brew list "$(brew_flag "$type")" "$name" >/dev/null 2>&1; then
+    skip "$name is not installed"
+  elif dry_run || confirm "Uninstall $name now?"; then
+    if run brew uninstall "$(brew_flag "$type")" "$name"; then
+      ok "uninstalled $name"
+    else
+      warn "could not uninstall $name (another package may depend on it); 'macos apply --prune' will retry"
+    fi
+  else
+    skip "left $name installed; 'macos apply --prune' will offer to remove it"
+  fi
+  commit_hint "Remove $name"
+}
+
+apps_adopt() {
+  local adoptable cask strays line t n profile choices
+  merge_active_brewfile
+
+  # 1. Declared casks whose app was installed by hand.
+  adoptable="$(brew_adoptable "$MERGED_BREWFILE")"
+  for cask in $adoptable; do
+    if dry_run || confirm "Hand the existing app of '$cask' over to Homebrew (brew install --cask --adopt)?"; then
+      run brew install --cask --adopt "$cask"
+      ok "adopted $cask"
+    fi
+  done
+
+  # 2. Brew installs no active Brewfile declares.
+  strays="$(brew bundle dump --file=- --no-describe --formula --cask --tap 2>/dev/null |
+    { grep -E '^(tap|brew|cask) "' || true; } | while IFS= read -r line; do
+      t="${line%% *}"
+      n="$(printf '%s' "$line" | sed -n 's/^[a-z]* "\([^"]*\)".*/\1/p')"
+      brewfile_declares "$MERGED_BREWFILE" "$t" "$n" || echo "$t $n"
+    done)"
+  if [ -z "$strays" ] && [ -z "$adoptable" ]; then
+    ok "everything installed with Homebrew is declared"
+    return 0
+  fi
+  [ -n "$strays" ] || return 0
+
+  say "Installed with Homebrew but not declared in any active Brewfile:"
+  printf '%s\n' "$strays" | sed 's/^/    /' >&2
+  if [ "$MACOS_YES" = 1 ] && [ -z "$target_profile" ]; then
+    warn "not declaring them: pass --profile <p> with --yes, or run without --yes to choose"
+    return 0
+  fi
+  choices="$(active_profiles | tr '\n' ' ')"
+  while read -r t n; do
+    if [ -n "$target_profile" ]; then
+      profile="$target_profile"
+    else
+      # shellcheck disable=SC2086
+      choose profile "Declare $t \"$n\" in which profile? (skip leaves it undeclared; prune would remove it)" $choices skip
+    fi
+    [ "$profile" = skip ] && { skip "left $n undeclared"; continue; }
+    profile_exists "$profile" || die "no profile '$profile' in $(profiles_dir)"
+    if [ "$t" = tap ]; then
+      run brew bundle add --file="$(profiles_dir)/$profile/Brewfile" --tap "$n"
+    else
+      run brew bundle add --file="$(profiles_dir)/$profile/Brewfile" "$(brew_flag "$t")" "$n"
+    fi
+    ok "declared $t \"$n\" in $profile"
+  done <<<"$strays"
+  commit_hint "Adopt existing Homebrew installs"
+}
+
+case "$action" in
+  add) apps_add ;;
+  remove | rm) apps_remove ;;
+  adopt) apps_adopt ;;
+  *) die "unknown action '$action' (add, remove or adopt)" ;;
+esac

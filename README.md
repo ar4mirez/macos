@@ -8,7 +8,7 @@ A small, declarative Bash engine that sets up and maintains my Macs. It covers:
 - **Identity:** the 1Password SSH agent, SSH commit signing, and per-org git identities.
 - **Profiles:** `base` plus one of `work` or `personal`.
 
-> **Status: Phase 2 (bootstrap).** `boot.sh` and `macos bootstrap` work through the app install. Later bootstrap steps and the other commands are still placeholders that exit with code `2`. See [Roadmap](#roadmap).
+> **Status: Phase 3 (apps).** Bootstrap works through the app install, and `apply`, `upgrade` and `apps` are complete for apps. Dotfiles, defaults, identity and `doctor` are still placeholders that exit with code `2`. See [Roadmap](#roadmap).
 
 ## Engine vs. data
 
@@ -69,6 +69,30 @@ macos update      Pull engine + dotfiles, run migrations, apply
 macos uninstall   Unlink dotfiles, remove the engine (apps are left alone)
 ```
 
+## Managing apps
+
+The profile Brewfiles in the dotfiles repo are the source of truth. This Mac uses `base` plus the profile saved in `machine.env`.
+
+```sh
+macos apps add spotify --cask            # declare in this Mac's profile + install
+macos apps add jq --profile base         # declare for every Mac
+macos apps remove slack                  # undeclare + uninstall (asks first)
+macos apps adopt                         # declare brew installs no Brewfile lists yet,
+                                         # and hand manually installed apps to Homebrew
+macos apply                              # install anything declared but missing (never upgrades)
+macos apply --prune                      # also uninstall brew packages no Brewfile declares
+macos upgrade                            # upgrade declared packages + mise runtimes
+```
+
+- **`apps add` and `apps remove`:** they edit the Brewfiles with `brew bundle add` and `brew bundle remove`, then remind you to commit in `~/.dotfiles`.
+  - `add` detects whether a name is a formula or a cask, and asks you to choose when it's both (e.g. `docker`).
+  - `add` refuses to duplicate an entry. `brew bundle add` would write it twice.
+- **`apply --prune`:**
+  - It always shows exactly what it would remove and asks first.
+  - It only removes formulae, casks and taps. It never touches App Store apps, VS Code extensions or npm/uv/cargo/go tools, or anything Homebrew didn't install.
+  - It also resets Homebrew's tap trust store to what the Brewfiles declare.
+- **`upgrade`:** it only *lists* macOS updates, because installing them needs a restart you choose.
+
 ## Development
 
 ```sh
@@ -88,7 +112,7 @@ Conventions:
 
 1. **Scaffold:** dispatcher, libraries, test harness, CI. *(done)*
 2. **Bootstrap:** `boot.sh`, profile selection, security baseline, `gh` auth, HTTPS dotfiles clone, Brewfile install. *(done)*
-3. **Apps:** `apply` / `--prune` / `upgrade` / `apps add|remove|adopt`.
+3. **Apps:** `apply` / `--prune` / `upgrade` / `apps add|remove|adopt`. *(done)*
 4. **Dotfiles:** Stow link, unlink and status, with backup of conflicting files.
 5. **Defaults:** the `defaults.conf` engine and imperative steps (Dock, Caps Lock, browser).
 6. **Identity:** 1Password agent, `includeIf` per org, signing keys.

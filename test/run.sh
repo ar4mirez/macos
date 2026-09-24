@@ -12,7 +12,7 @@ ROOT="$(cd -- "$(dirname -- "$0")/.." && pwd -P)"
 SANDBOX="$(mktemp -d "${TMPDIR:-/tmp}/macos-test.XXXXXX")"
 trap 'rm -rf "$SANDBOX"' EXIT
 
-STUBBED_TOOLS="defaults killall osascript scutil sudo brew mas dockutil duti softwareupdate stow hidutil pmset gh op git curl xcode-select uname"
+STUBBED_TOOLS="defaults killall osascript scutil sudo brew mas dockutil duti softwareupdate stow hidutil pmset gh op git curl xcode-select uname mise"
 
 REAL_HOME="$HOME"
 export HOME="$SANDBOX/home"
@@ -198,8 +198,8 @@ check "bootstrap is dispatched under bash 3.2" t_bootstrap_runs_on_bash32
 t_bash4_override() {
   [ -n "$BASH4" ] || { echo "no bash 4 available"; return 0; }
   local rc=0
-  MACOS_BASH="$BASH4" "$M" apply >/dev/null 2>&1 || rc=$?
-  [ "$rc" -eq 2 ]
+  MACOS_BASH="$BASH4" "$M" defaults >"$SANDBOX/o" 2>&1 || rc=$?
+  [ "$rc" -eq 2 ] && grep -q 'not implemented' "$SANDBOX/o"
 }
 check "bash-4 subcommands run under MACOS_BASH" t_bash4_override
 
@@ -228,7 +228,7 @@ check "environment wins over machine.env" t_env_precedence
 
 t_log_no_color() {
   local out
-  out="$(. "$ROOT/lib/log.sh"; say hello 2>&1; ok finished 2>&1)"
+  out="$(MACOS_DRY_RUN=0; . "$ROOT/lib/log.sh"; say hello 2>&1; ok finished 2>&1)"
   [ "$out" = "$(printf '==> hello\n ok finished')" ]
 }
 check "log helpers write plain text to stderr under NO_COLOR" t_log_no_color
@@ -251,6 +251,25 @@ t_err_trap_names_step() {
   printf '%s' "$out" | grep -q 'failed (exit 1) during: doing a thing'
 }
 check "ERR trap names the failing step" t_err_trap_names_step
+
+t_err_reported_once() {
+  local out
+  out="$(/bin/bash -c '. "$1/lib/common.sh"; inner() { false; }; outer() { inner; }; outer' _ "$ROOT" 2>&1)"
+  [ "$(printf '%s\n' "$out" | grep -c 'failed (exit')" -eq 1 ]
+}
+check "ERR trap reports a failure once, not per call level" t_err_reported_once
+
+t_die_not_reported_as_failure() {
+  local out
+  out="$(/bin/bash -c '. "$1/lib/common.sh"; die "clear message"' _ "$ROOT" 2>&1)"
+  printf '%s' "$out" | grep -q 'clear message' && ! printf '%s' "$out" | grep -q 'failed (exit'
+}
+check "die is not followed by a generic failure line" t_die_not_reported_as_failure
+
+t_ok_marks_dry_run() {
+  [ "$(MACOS_DRY_RUN=1 /bin/bash -c '. "$1/lib/log.sh"; ok installed x' _ "$ROOT" 2>&1)" = "  ~ installed x (dry run)" ]
+}
+check "ok lines are marked under --dry-run" t_ok_marks_dry_run
 
 t_exit_hooks() {
   /bin/bash -c '. "$1/lib/common.sh"; on_exit "touch $2/a"; on_exit "touch $2/b"; exit 3' _ "$ROOT" "$SANDBOX" >/dev/null 2>&1
@@ -472,7 +491,7 @@ check "bootstrap rejects an unknown profile" t_bootstrap_rejects_unknown_profile
 
 t_bootstrap_full() {
   bootstrap_env
-  STUB_GH_OUT="  - Token scopes: 'admin:public_key', 'admin:ssh_signing_key', 'repo'" \
+  STUB_BREW_BUNDLE_CHECK_RC=1 STUB_GH_OUT="  - Token scopes: 'admin:public_key', 'admin:ssh_signing_key', 'repo'" \
     "$M" bootstrap --yes --profile work --hostname "Studio Mac" >"$SANDBOX/o" 2>&1 || { cat "$SANDBOX/o"; return 1; }
   local L="$STUB_LOG" E="$MACOS_STATE/machine.env" B="$MACOS_STATE/Brewfile"
   grep -qx 'MACOS_PROFILE="work"' "$E" && grep -qx 'MACOS_HOSTNAME="Studio Mac"' "$E" || { echo "machine.env"; cat "$E"; return 1; }
@@ -528,6 +547,236 @@ t_bootstrap_interactive() {
   grep -q 'profile: personal, computer name: Current Name' "$SANDBOX/o"
 }
 check "bootstrap prompts for profile and hostname on the terminal" t_bootstrap_interactive
+
+# ---------------------------------------------------------------------------
+section "apply"
+
+phase3_env() {
+  rm -rf "$MACOS_STATE" "$SANDBOX/Applications"
+  make_dotfiles_fixture
+  mkdir -p "$MACOS_STATE" "$SANDBOX/Applications"
+  printf 'MACOS_PROFILE="work"\n' >"$MACOS_STATE/machine.env"
+  : >"$STUB_LOG"
+}
+W="$MACOS_DOTFILES/macos/profiles/work/Brewfile"
+BASEF="$MACOS_DOTFILES/macos/profiles/base/Brewfile"
+
+t_apply_requires_profile() {
+  phase3_env; rm -f "$MACOS_STATE/machine.env"
+  "$M" apply >"$SANDBOX/o" 2>&1 && return 1
+  grep -q 'no profile set for this Mac' "$SANDBOX/o"
+}
+check "apply refuses before bootstrap" t_apply_requires_profile
+
+t_apply_noop() {
+  phase3_env
+  "$M" apply >"$SANDBOX/o" 2>&1 || { cat "$SANDBOX/o"; return 1; }
+  grep -q 'all declared apps are installed' "$SANDBOX/o" && ! grep -q 'bundle install' "$STUB_LOG" &&
+    grep -qx 'cask "slack"' "$MACOS_STATE/Brewfile"
+}
+check "apply changes nothing when everything is installed" t_apply_noop
+
+t_apply_installs() {
+  phase3_env
+  STUB_BREW_BUNDLE_CHECK_RC=1 "$M" apply >"$SANDBOX/o" 2>&1 || { cat "$SANDBOX/o"; return 1; }
+  grep -q "^brew bundle install --file=$MACOS_STATE/Brewfile --no-upgrade" "$STUB_LOG"
+}
+check "apply installs missing entries without upgrading" t_apply_installs
+
+t_apply_dry_run() {
+  phase3_env
+  STUB_BREW_BUNDLE_CHECK_RC=1 STUB_BREW_BUNDLE_CHECK_OUT="→ Cask slack needs to be installed." \
+    "$M" apply --dry-run >"$SANDBOX/o" 2>&1 || { cat "$SANDBOX/o"; return 1; }
+  grep -q '    cask slack' "$SANDBOX/o" && ! grep -q 'bundle install' "$STUB_LOG" && [ ! -f "$MACOS_STATE/Brewfile" ]
+}
+check "apply --dry-run lists what it would install and writes nothing" t_apply_dry_run
+
+t_apply_warns_adoptable() {
+  phase3_env
+  mkdir -p "$SANDBOX/Applications/Slack.app"
+  STUB_BREW_BUNDLE_CHECK_RC=1 STUB_BREW_BUNDLE_CHECK_OUT="→ Cask slack needs to be installed." \
+    STUB_BREW_INFO___CASK_OUT='{"casks":[{"artifacts":[{"app":["Slack.app"]},{"zap":[]}]}]}' \
+    MACOS_APPLICATIONS_DIRS="$SANDBOX/Applications" "$M" apply >"$SANDBOX/o" 2>&1 || { cat "$SANDBOX/o"; return 1; }
+  grep -q 'installed by hand.*slack' "$SANDBOX/o" && grep -q "macos apps adopt" "$SANDBOX/o"
+}
+check "apply points hand-installed apps at 'apps adopt'" t_apply_warns_adoptable
+
+t_prune_nothing() {
+  phase3_env
+  STUB_BREW_BUNDLE_CLEANUP_RC=0 "$M" apply --prune --yes >"$SANDBOX/o" 2>&1 || { cat "$SANDBOX/o"; return 1; }
+  grep -q 'nothing to prune' "$SANDBOX/o" && ! grep -q -- '--force' "$STUB_LOG"
+}
+check "prune does nothing when nothing is undeclared" t_prune_nothing
+
+PRUNE_OUT="$(printf 'Would uninstall formulae:\njq\nRun `brew bundle cleanup --force` to make these changes.')"
+
+t_prune_confirmed() {
+  phase3_env
+  STUB_LOG_ENV="HOMEBREW_BUNDLE_CLEANUP_NO_MAS HOMEBREW_BUNDLE_CLEANUP_NO_NPM" \
+    STUB_BREW_BUNDLE_CLEANUP_RC=1 STUB_BREW_BUNDLE_CLEANUP___FORCE_RC=0 STUB_BREW_BUNDLE_CLEANUP_OUT="$PRUNE_OUT" \
+    "$M" apply --prune --yes >"$SANDBOX/o" 2>&1 || { cat "$SANDBOX/o"; return 1; }
+  grep -q '    jq' "$SANDBOX/o" &&
+    grep -q "^brew bundle cleanup --force --file=$MACOS_STATE/Brewfile \[HOMEBREW_BUNDLE_CLEANUP_NO_MAS=1\] \[HOMEBREW_BUNDLE_CLEANUP_NO_NPM=1\]" "$STUB_LOG" &&
+    grep -q "^brew bundle cleanup --file=.*NO_MAS=1" "$STUB_LOG"
+}
+check "prune shows the list, keeps App Store/npm cleaners off, then forces" t_prune_confirmed
+
+t_prune_declined() {
+  phase3_env
+  printf 'n\n' >"$SANDBOX/answers"
+  MACOS_TTY="$SANDBOX/answers" STUB_BREW_BUNDLE_CLEANUP_RC=1 STUB_BREW_BUNDLE_CLEANUP_OUT="$PRUNE_OUT" \
+    "$M" apply --prune >"$SANDBOX/o" 2>&1 || { cat "$SANDBOX/o"; return 1; }
+  grep -q 'prune cancelled' "$SANDBOX/o" && ! grep -q -- '--force' "$STUB_LOG"
+}
+check "prune removes nothing when not confirmed" t_prune_declined
+
+t_prune_dry_run() {
+  phase3_env
+  STUB_BREW_BUNDLE_CLEANUP_RC=1 STUB_BREW_BUNDLE_CLEANUP_OUT="$PRUNE_OUT" \
+    "$M" apply --prune --dry-run --yes >"$SANDBOX/o" 2>&1 || { cat "$SANDBOX/o"; return 1; }
+  grep -q '    jq' "$SANDBOX/o" && ! grep -q -- '--force' "$STUB_LOG"
+}
+check "prune --dry-run only lists" t_prune_dry_run
+
+t_prune_error() {
+  phase3_env
+  STUB_BREW_BUNDLE_CLEANUP_RC=2 STUB_BREW_BUNDLE_CLEANUP_OUT="Error: boom" \
+    "$M" apply --prune --yes >"$SANDBOX/o" 2>&1 && return 1
+  grep -q 'cleanup failed (exit 2)' "$SANDBOX/o" && ! grep -q -- '--force' "$STUB_LOG"
+}
+check "prune stops on a cleanup error instead of guessing" t_prune_error
+
+# ---------------------------------------------------------------------------
+section "upgrade"
+
+t_upgrade() {
+  phase3_env
+  "$M" upgrade >"$SANDBOX/o" 2>&1 || { cat "$SANDBOX/o"; return 1; }
+  grep -q '^brew update --quiet' "$STUB_LOG" &&
+    grep -q "^brew bundle install --file=$MACOS_STATE/Brewfile --upgrade" "$STUB_LOG" &&
+    grep -q '^mise upgrade' "$STUB_LOG" && grep -q '^softwareupdate --list' "$STUB_LOG" &&
+    ! grep -q '^softwareupdate --install' "$STUB_LOG"
+}
+check "upgrade upgrades declared packages and runtimes, only lists macOS updates" t_upgrade
+
+t_upgrade_dry_run() {
+  phase3_env
+  "$M" upgrade --dry-run >"$SANDBOX/o" 2>&1 || { cat "$SANDBOX/o"; return 1; }
+  grep -q '^brew outdated' "$STUB_LOG" && ! grep -qE '^brew (update|bundle install)|^mise upgrade' "$STUB_LOG"
+}
+check "upgrade --dry-run only reports" t_upgrade_dry_run
+
+# ---------------------------------------------------------------------------
+section "apps"
+
+t_add_cask() {
+  phase3_env
+  STUB_BREW_LIST_RC=1 "$M" apps add spotify --cask >"$SANDBOX/o" 2>&1 || { cat "$SANDBOX/o"; return 1; }
+  grep -q "^brew bundle add --file=$W --cask spotify" "$STUB_LOG" && grep -q '^brew install --cask spotify' "$STUB_LOG"
+}
+check "apps add declares in this Mac's profile, then installs" t_add_cask
+
+t_add_already() {
+  phase3_env
+  "$M" apps add slack --cask >"$SANDBOX/o" 2>&1 || { cat "$SANDBOX/o"; return 1; }
+  grep -q 'already declared in work' "$SANDBOX/o" && ! grep -q 'bundle add' "$STUB_LOG"
+}
+check "apps add does not duplicate an entry (brew bundle add would)" t_add_already
+
+t_add_in_base() {
+  phase3_env
+  "$M" apps add git --formula --profile work >"$SANDBOX/o" 2>&1 && return 1
+  grep -q 'already declared in base' "$SANDBOX/o"
+}
+check "apps add refuses to repeat a base entry in a profile" t_add_in_base
+
+t_add_detects_type() {
+  phase3_env
+  STUB_BREW_INFO___CASK_RC=1 "$M" apps add htop --no-install >"$SANDBOX/o" 2>&1 || { cat "$SANDBOX/o"; return 1; }
+  grep -q "^brew bundle add --file=$W --formula htop" "$STUB_LOG" && ! grep -q '^brew install' "$STUB_LOG"
+}
+check "apps add detects a formula and honours --no-install" t_add_detects_type
+
+t_add_ambiguous() {
+  phase3_env
+  "$M" apps add docker >"$SANDBOX/o" 2>&1 && return 1
+  grep -q 'both a formula and a cask' "$SANDBOX/o"
+}
+check "apps add asks for --formula/--cask when the name is ambiguous" t_add_ambiguous
+
+t_add_other_profile() {
+  phase3_env; mkdir -p "$MACOS_DOTFILES/macos/profiles/personal"
+  "$M" apps add spotify --cask --profile personal >"$SANDBOX/o" 2>&1 || { cat "$SANDBOX/o"; return 1; }
+  grep -q "^brew bundle add --file=$MACOS_DOTFILES/macos/profiles/personal/Brewfile --cask spotify" "$STUB_LOG" &&
+    grep -q "not this Mac's profile" "$SANDBOX/o" && ! grep -q '^brew install' "$STUB_LOG"
+}
+check "apps add to another profile declares without installing here" t_add_other_profile
+
+t_remove() {
+  phase3_env
+  "$M" apps remove slack --yes >"$SANDBOX/o" 2>&1 || { cat "$SANDBOX/o"; return 1; }
+  grep -q "^brew bundle remove --file=$W --cask slack" "$STUB_LOG" && grep -q '^brew uninstall --cask slack' "$STUB_LOG"
+}
+check "apps remove undeclares and uninstalls" t_remove
+
+t_remove_undeclared() {
+  phase3_env
+  "$M" apps remove nothere --yes >"$SANDBOX/o" 2>&1 && return 1
+  grep -q 'not declared in any profile' "$SANDBOX/o"
+}
+check "apps remove refuses an undeclared name" t_remove_undeclared
+
+t_remove_still_in_base() {
+  phase3_env
+  printf 'cask "slack"\n' >>"$BASEF"
+  "$M" apps remove slack --profile work --yes >"$SANDBOX/o" 2>&1 || { cat "$SANDBOX/o"; return 1; }
+  grep -q "bundle remove --file=$W" "$STUB_LOG" && ! grep -q "bundle remove --file=$BASEF" "$STUB_LOG" &&
+    grep -q 'still declared in base' "$SANDBOX/o" && ! grep -q '^brew uninstall' "$STUB_LOG"
+}
+check "apps remove keeps it installed while another active profile wants it" t_remove_still_in_base
+
+t_remove_keep() {
+  phase3_env
+  "$M" apps remove slack --keep-installed --yes >"$SANDBOX/o" 2>&1 || { cat "$SANDBOX/o"; return 1; }
+  ! grep -q '^brew uninstall' "$STUB_LOG"
+}
+check "apps remove --keep-installed only undeclares" t_remove_keep
+
+DUMP_OUT="$(printf 'brew "git"\nbrew "htop"\ncask "slack"\ntap "someone/tools"')"
+
+t_adopt_strays() {
+  phase3_env
+  STUB_BREW_BUNDLE_DUMP_OUT="$DUMP_OUT" "$M" apps adopt --yes --profile work >"$SANDBOX/o" 2>&1 || { cat "$SANDBOX/o"; return 1; }
+  grep -q "^brew bundle add --file=$W --formula htop" "$STUB_LOG" &&
+    grep -q "^brew bundle add --file=$W --tap someone/tools" "$STUB_LOG" &&
+    ! grep -qE 'bundle add .*(git|slack)$' "$STUB_LOG"
+}
+check "apps adopt declares only undeclared installs" t_adopt_strays
+
+t_adopt_needs_profile_with_yes() {
+  phase3_env
+  STUB_BREW_BUNDLE_DUMP_OUT="$DUMP_OUT" "$M" apps adopt --yes >"$SANDBOX/o" 2>&1 || { cat "$SANDBOX/o"; return 1; }
+  grep -q '    brew htop' "$SANDBOX/o" && grep -q 'pass --profile' "$SANDBOX/o" && ! grep -q 'bundle add' "$STUB_LOG"
+}
+check "apps adopt --yes without --profile only lists" t_adopt_needs_profile_with_yes
+
+t_adopt_interactive() {
+  phase3_env
+  printf '1\n3\n' >"$SANDBOX/answers"
+  STUB_BREW_BUNDLE_DUMP_OUT="$DUMP_OUT" MACOS_TTY="$SANDBOX/answers" "$M" apps adopt >"$SANDBOX/o" 2>&1 || { cat "$SANDBOX/o"; return 1; }
+  grep -q "^brew bundle add --file=$BASEF --formula htop" "$STUB_LOG" && grep -q 'left someone/tools undeclared' "$SANDBOX/o"
+}
+check "apps adopt asks per package (base / profile / skip)" t_adopt_interactive
+
+t_adopt_hand_installed() {
+  phase3_env
+  mkdir -p "$SANDBOX/Applications/Slack.app"
+  STUB_BREW_BUNDLE_CHECK_RC=1 STUB_BREW_BUNDLE_CHECK_OUT="→ Cask slack needs to be installed." \
+    STUB_BREW_INFO___CASK_OUT='{"casks":[{"artifacts":[{"app":["Slack.app"]}]}]}' \
+    MACOS_APPLICATIONS_DIRS="$SANDBOX/Applications" "$M" apps adopt --yes --profile work >"$SANDBOX/o" 2>&1 || { cat "$SANDBOX/o"; return 1; }
+  grep -q '^brew install --cask --adopt slack' "$STUB_LOG"
+}
+check "apps adopt hands a hand-installed app to Homebrew" t_adopt_hand_installed
 
 # ---------------------------------------------------------------------------
 section "boot.sh"
