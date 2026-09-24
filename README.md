@@ -4,7 +4,7 @@ A small, declarative Bash engine that sets up and maintains my Macs. It covers:
 
 - **Apps:** Homebrew formulae, casks and Mac App Store apps, declared in per-profile Brewfiles. It installs them, and it can prune anything a Brewfile no longer lists.
 - **Dotfiles:** GNU Stow packages from a separate private repo.
-- **macOS settings:** declared `defaults`, Dock layout, Caps Lock, default browser and a Brave policy. Each write is read back to confirm it took effect.
+- **macOS settings:** declared `defaults`, Dock layout, Caps Lock, keyboard shortcuts to switch off, default browser and a Brave policy. Each write is read back to confirm it took effect.
 - **Identity:** the 1Password SSH agent, SSH commit signing, and per-org git identities.
 - **Profiles:** `base` plus one of `work` or `personal`.
 
@@ -19,7 +19,7 @@ This repo is only the **engine**. It holds no personal data. Everything personal
   macos/profiles/{base,work,personal}/
       Brewfile            apps for this profile
       defaults.conf       domain | key | type | value
-      system.conf         capslock, browser (key = value)
+      system.conf         capslock, browser, hotkeys_off (key = value)
       dock.conf           Dock layout (a profile's replaces base's)
       stow.list           Stow packages to link
       brave.json          Brave policies (merged across profiles)
@@ -55,7 +55,7 @@ curl -fsSL https://raw.githubusercontent.com/ar4mirez/macos/main/boot.sh | bash 
 5. **Dotfiles repo:** clones the private repo over HTTPS, with `gh` as the only credential helper, and turns on its gitleaks hook.
 6. **Apps:** merges the base and profile Brewfiles and runs `brew bundle install --no-upgrade`. If one app fails, the rest of the setup still runs and bootstrap exits non-zero at the end.
 7. **Dotfiles and runtimes:** links the Stow packages, then runs `mise install`.
-8. **macOS settings:** applies `defaults.conf`, the Dock layout, Caps Lock, the default browser and the Brave policy.
+8. **macOS settings:** applies `defaults.conf`, the Dock layout, Caps Lock, the keyboard shortcuts to switch off, the default browser and the Brave policy.
 9. **Identity:** writes the git identities. Once 1Password's SSH agent answers, it also sets up signing and SSH (see [Identity](#identity)).
 10. **Migrations and health check:** a fresh Mac marks all migrations as done; a Mac bootstrapped before runs any that are pending. Then `macos doctor`.
 
@@ -136,6 +136,7 @@ macos defaults apply     # also part of `macos apply` and `macos bootstrap`
 - **`system.conf`:**
   - `capslock` (`none`/`escape`/`control`). The remap uses `hidutil`, plus a LaunchAgent that re-applies it at each login.
   - `browser`, a bundle ID set with `duti`. macOS asks you to confirm the change once.
+  - `hotkeys_off`, the ids of macOS keyboard shortcuts to switch off, such as `60` (select the previous input source, `Ctrl+Space`, which is tmux's prefix). The ids are the keys of `AppleSymbolicHotKeys` in `com.apple.symbolichotkeys`. An id removed from the list stays off; turn it back on in System Settings > Keyboard > Keyboard Shortcuts.
 - **Brave:** `brave.json` (policies) and `brave-extensions.conf` (extensions) become one user configuration profile, which you approve in System Settings whenever it changes. See [Brave extensions](#brave-extensions).
 
 ## Brave extensions

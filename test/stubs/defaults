@@ -1,8 +1,8 @@
 #!/bin/bash
-# Stateful test double for `defaults`: read, read-type, write and delete
-# against a flat file ($STUB_DEFAULTS_DB) of `host|domain|key|type|value`
-# lines, so tests can check idempotency and read-back. Logged like the
-# generic stub. Never touches real preferences.
+# Stateful test double for `defaults`: read, read-type, write (plain and
+# -dict-add), export and delete against a flat file ($STUB_DEFAULTS_DB) of
+# `host|domain|key|type|value` lines, so tests can check idempotency and
+# read-back. Logged like the generic stub. Never touches real preferences.
 
 printf 'defaults %s\n' "$*" >>"${STUB_LOG:-/dev/null}"
 db="${STUB_DEFAULTS_DB:-/dev/null}"
@@ -27,7 +27,29 @@ case "$cmd" in
     line="$(lookup)" || exit 1
     printf 'Type is %s\n' "$(printf '%s' "$line" | cut -d'|' -f4)"
     ;;
+  export)
+    # Only dict entries (written with -dict-add) are exported, as an XML plist.
+    printf '<?xml version="1.0" encoding="UTF-8"?>\n<plist version="1.0"><dict>\n'
+    awk -F'|' -v h="$host" -v d="$dom" '
+      $1 == h && $2 == d && $4 == "dict-entry" {
+        split($3, k, "."); if (!(k[1] in seen)) { seen[k[1]] = 1; order[++n] = k[1] }
+        body[k[1]] = body[k[1]] "<key>" k[2] "</key>" $5 "\n"
+      }
+      END { for (i = 1; i <= n; i++) printf "<key>%s</key><dict>\n%s</dict>\n", order[i], body[order[i]] }' "$db"
+    printf '</dict></plist>\n'
+    ;;
   write)
+    if [ "${4:-}" = -dict-add ]; then
+      [ -n "${STUB_DEFAULTS_IGNORE_WRITES:-}" ] && exit 0
+      shift 4
+      while [ $# -ge 2 ]; do
+        awk -F'|' -v h="$host" -v d="$dom" -v k="$key.$1" '!($1 == h && $2 == d && $3 == k)' "$db" >"$db.tmp"
+        printf '%s|%s|%s|dict-entry|%s\n' "$host" "$dom" "$key.$1" "$2" >>"$db.tmp"
+        mv "$db.tmp" "$db"
+        shift 2
+      done
+      exit 0
+    fi
     case "${4:-}" in
       -bool) type=boolean; case "${5:-}" in true | yes | 1) val=1 ;; *) val=0 ;; esac ;;
       -int) type=integer; val="$5" ;;

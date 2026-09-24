@@ -1180,6 +1180,54 @@ PLIST
 }
 check "default browser: set via duti, pending until confirmed, then left alone" t_browser
 
+HOTKEY_OFF_WRITE='defaults write com.apple.symbolichotkeys AppleSymbolicHotKeys -dict-add 60 <dict><key>enabled</key><false/></dict>'
+
+t_hotkeys() {
+  system_env
+  printf 'hotkeys_off = 60\n' >>"$MACOS_DOTFILES/macos/profiles/base/system.conf"
+  "$M" defaults check >"$SANDBOX/o" 2>&1 && return 1
+  grep -q 'drift  hotkeys: shortcut(s) still on: 60$' "$SANDBOX/o" && ! grep -q 'defaults write' "$STUB_LOG" || { cat "$SANDBOX/o"; return 1; }
+  "$M" defaults apply >"$SANDBOX/o" 2>&1 || { cat "$SANDBOX/o"; return 1; }
+  grep -qxF "$HOTKEY_OFF_WRITE" "$STUB_LOG" && grep -q '^activateSettings -u' "$STUB_LOG" &&
+    grep -q 'keyboard shortcut(s) 60 off' "$SANDBOX/o" || { cat "$STUB_LOG" "$SANDBOX/o"; return 1; }
+  # Second run: already off, nothing written.
+  : >"$STUB_LOG"
+  "$M" defaults apply >"$SANDBOX/o" 2>&1 || { cat "$SANDBOX/o"; return 1; }
+  ! grep -q 'defaults write com.apple.symbolichotkeys' "$STUB_LOG" && grep -q 'keyboard shortcuts 60 already off' "$SANDBOX/o" || { cat "$STUB_LOG"; return 1; }
+  # Turned back on in System Settings: drift, and apply turns it off again.
+  awk -F'|' '$2 != "com.apple.symbolichotkeys"' "$STUB_DEFAULTS_DB" >"$SANDBOX/db" && mv "$SANDBOX/db" "$STUB_DEFAULTS_DB"
+  printf 'global|com.apple.symbolichotkeys|AppleSymbolicHotKeys.60|dict-entry|<dict><key>enabled</key><true/></dict>\n' >>"$STUB_DEFAULTS_DB"
+  "$M" defaults check >"$SANDBOX/o" 2>&1 && return 1
+  "$M" defaults apply >/dev/null 2>&1
+  grep -qxF "$HOTKEY_OFF_WRITE" "$STUB_LOG"
+}
+check "keyboard shortcuts: hotkeys_off turns them off, idempotent, and drift when re-enabled" t_hotkeys
+
+t_hotkeys_not_taken() {
+  system_env
+  printf 'hotkeys_off = 60\n' >>"$MACOS_DOTFILES/macos/profiles/base/system.conf"
+  STUB_DEFAULTS_IGNORE_WRITES=1 "$M" defaults apply >"$SANDBOX/o" 2>&1 || { cat "$SANDBOX/o"; return 1; }
+  grep -q 'keyboard shortcut(s) 60 did not turn off' "$SANDBOX/o"
+}
+check "keyboard shortcuts: a write that does not read back is reported" t_hotkeys_not_taken
+
+t_hotkeys_dry_run() {
+  system_env
+  printf 'hotkeys_off = 60\n' >>"$MACOS_DOTFILES/macos/profiles/base/system.conf"
+  "$M" defaults apply --dry-run >"$SANDBOX/o" 2>&1 || { cat "$SANDBOX/o"; return 1; }
+  ! grep -q 'defaults write com.apple.symbolichotkeys' "$STUB_LOG" && ! grep -q '^activateSettings' "$STUB_LOG" &&
+    grep -q 'would run: defaults write com.apple.symbolichotkeys AppleSymbolicHotKeys -dict-add 60' "$SANDBOX/o"
+}
+check "keyboard shortcuts: --dry-run writes nothing" t_hotkeys_dry_run
+
+t_hotkeys_invalid() {
+  system_env
+  printf 'hotkeys_off = 60 spotlight\n' >>"$MACOS_DOTFILES/macos/profiles/base/system.conf"
+  "$M" defaults apply >"$SANDBOX/o" 2>&1 && return 1
+  grep -q "hotkeys_off takes numeric shortcut ids (got 'spotlight')" "$SANDBOX/o" && ! grep -q 'defaults write com.apple.symbolichotkeys' "$STUB_LOG"
+}
+check "keyboard shortcuts: a non-numeric id stops the run before any write" t_hotkeys_invalid
+
 
 
 t_system_check() {

@@ -236,19 +236,87 @@ browser_apply() {
   ok "default browser → $want (macOS asks you to confirm)"
 }
 
+# --- Keyboard shortcuts ----------------------------------------------------
+
+# macOS keeps its own shortcuts (System Settings > Keyboard > Keyboard
+# Shortcuts) as a dict of numbered entries in com.apple.symbolichotkeys, which
+# defaults.conf cannot express. `hotkeys_off` lists the ids to switch off, e.g.
+# 60 (select the previous input source, Ctrl+Space). An id with no entry is
+# still at its macOS default, which is on.
+
+# hotkeys_off — the declared ids, one per line; dies on anything else.
+hotkeys_off() {
+  local id
+  for id in $(system_setting hotkeys_off | tr ',' ' '); do
+    case "$id" in
+      '' | *[!0-9]*) die "hotkeys_off takes numeric shortcut ids (got '$id')" ;;
+    esac
+    printf '%s\n' "$id"
+  done
+}
+
+# _hotkey_enabled <id> — the stored enabled flag: false, true or 0/1 (on
+# when there is no entry).
+_hotkey_enabled() {
+  { defaults export com.apple.symbolichotkeys - 2>/dev/null || true; } |
+    plutil -extract "AppleSymbolicHotKeys.$1.enabled" raw -o - - 2>/dev/null || echo true
+}
+
+# _hotkeys_on — the declared ids that are still on.
+_hotkeys_on() {
+  local id
+  for id in $(hotkeys_off); do
+    case "$(_hotkey_enabled "$id")" in
+      false | 0) ;;
+      *) printf '%s\n' "$id" ;;
+    esac
+  done
+}
+
+hotkeys_state() {
+  local on
+  hotkeys_off >/dev/null
+  on="$(_hotkeys_on | tr '\n' ' ')"
+  if [ -z "$on" ]; then
+    echo ok
+  else
+    echo "drift shortcut(s) still on: ${on% }"
+  fi
+}
+
+hotkeys_apply() {
+  local id on
+  hotkeys_off >/dev/null # validate before writing anything
+  on="$(_hotkeys_on)"
+  if [ -z "$on" ]; then
+    [ -z "$(hotkeys_off)" ] || skip "keyboard shortcuts $(hotkeys_off | tr '\n' ' ')already off"
+    return 0
+  fi
+  for id in $on; do
+    run defaults write com.apple.symbolichotkeys AppleSymbolicHotKeys -dict-add "$id" '<dict><key>enabled</key><false/></dict>'
+  done
+  run "$ACTIVATE_SETTINGS" -u
+  if ! dry_run && [ -n "$(_hotkeys_on)" ]; then
+    warn "keyboard shortcut(s) $(_hotkeys_on | tr '\n' ' ')did not turn off"
+  else
+    ok "keyboard shortcut(s) $(printf '%s' "$on" | tr '\n' ' ') off"
+  fi
+}
+
 # --- All -------------------------------------------------------------------
 
 system_apply() {
   dock_apply
   capslock_apply
   browser_apply
+  hotkeys_apply
   brave_policy_apply
 }
 
 # system_check — report drift; returns 1 on any.
 system_check() {
   local name state bad=0
-  for name in dock capslock browser brave_policy; do
+  for name in dock capslock browser hotkeys brave_policy; do
     state="$("${name}_state")"
     if [ "$state" != ok ]; then
       printf '  drift  %s: %s\n' "$name" "${state#drift }"

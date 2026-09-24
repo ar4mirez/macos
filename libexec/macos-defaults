@@ -3,9 +3,10 @@
 # macos:usage=macos defaults apply|check [--dry-run]
 #
 #   apply   write every drifted defaults.conf key (verified by reading it
-#           back), then the Dock layout, Caps Lock, default browser and
-#           Brave policy (settings + extensions in every Brave profile) from
-#           dock.conf / system.conf / brave.json / brave-extensions.conf
+#           back), then the Dock layout, Caps Lock, keyboard shortcuts,
+#           default browser and Brave policy (settings + extensions in every
+#           Brave profile) from dock.conf / system.conf / brave.json /
+#           brave-extensions.conf
 #   check   report drift only; exits 1 if anything differs
 
 # shellcheck source=lib/common.sh
