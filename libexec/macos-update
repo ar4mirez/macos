@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# macos:summary=Pull engine and dotfiles, run migrations, then apply
+# macos:usage=macos update [--dry-run]
+
+# shellcheck source=lib/common.sh
+. "${MACOS_ROOT:=$(cd -- "$(dirname -- "$0")/.." && pwd -P)}/lib/common.sh"
+
+not_implemented 7

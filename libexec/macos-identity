@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# macos:summary=Configure 1Password SSH agent, git identities and commit signing
+# macos:usage=macos identity [--dry-run]
+
+# shellcheck source=lib/common.sh
+. "${MACOS_ROOT:=$(cd -- "$(dirname -- "$0")/.." && pwd -P)}/lib/common.sh"
+
+not_implemented 6

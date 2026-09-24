@@ -1,0 +1,89 @@
+#!/bin/bash
+# macos — command dispatcher for the macOS setup engine.
+#
+# Subcommands live in libexec/macos-<name> and describe themselves with
+# header metadata (read from the first 40 lines):
+#   # macos:summary=<one line>       shown in `macos help`
+#   # macos:usage=<usage line>       shown in `macos <name> --help`
+#   # macos:bash=3                   runs under /bin/bash 3.2 (bootstrap path)
+#   # macos:hidden=1                 omitted from `macos help`
+# Without macos:bash=3 a subcommand needs bash 4+ and is re-executed under it.
+#
+# This file must stay bash-3.2-safe.
+
+set -Eeuo pipefail
+
+_self="${BASH_SOURCE[0]}"
+while [ -L "$_self" ]; do
+  _dir="$(cd -- "$(dirname -- "$_self")" && pwd -P)"
+  _self="$(readlink "$_self")"
+  case "$_self" in /*) ;; *) _self="$_dir/$_self" ;; esac
+done
+MACOS_ROOT="$(cd -- "$(dirname -- "$_self")/.." && pwd -P)"
+export MACOS_ROOT
+unset _self _dir
+
+# shellcheck source=lib/env.sh
+. "$MACOS_ROOT/lib/env.sh"
+# shellcheck source=lib/log.sh
+. "$MACOS_ROOT/lib/log.sh"
+
+meta() { # meta <file> <key>
+  sed -n "1,40s/^# macos:$2=//p" "$1" | head -n 1
+}
+
+version() { cat "$MACOS_ROOT/version"; }
+
+usage() {
+  printf 'macos %s — set up and maintain this Mac\n\n' "$(version)"
+  printf 'Usage: macos <command> [args]\n\nCommands:\n'
+  local f name
+  for f in "$MACOS_ROOT"/libexec/macos-*; do
+    [ -f "$f" ] || continue
+    [ "$(meta "$f" hidden)" = 1 ] && continue
+    name="${f##*/macos-}"
+    printf '  %-12s %s\n' "$name" "$(meta "$f" summary)"
+  done
+  printf '\nRun `macos <command> --help` for details.\n'
+}
+
+# find_bash4 — print the path of a bash >= 4, or fail.
+find_bash4() {
+  local b
+  for b in "${MACOS_BASH:-}" /opt/homebrew/bin/bash /usr/local/bin/bash "$(command -v bash || true)"; do
+    [ -n "$b" ] && [ -x "$b" ] || continue
+    if "$b" -c '[ "${BASH_VERSINFO[0]}" -ge 4 ]' 2>/dev/null; then
+      printf '%s\n' "$b"
+      return 0
+    fi
+  done
+  return 1
+}
+
+cmd="${1:-help}"
+case "$cmd" in
+  help | -h | --help) usage; exit 0 ;;
+  version | -v | --version) version; exit 0 ;;
+esac
+shift
+
+script="$MACOS_ROOT/libexec/macos-$cmd"
+if [ ! -f "$script" ]; then
+  warn "unknown command: $cmd"
+  usage >&2
+  exit 127
+fi
+
+case "${1:-}" in
+  -h | --help)
+    printf '%s\n\nUsage: %s\n' "$(meta "$script" summary)" "$(meta "$script" usage)"
+    exit 0
+    ;;
+esac
+
+if [ "$(meta "$script" bash)" = 3 ]; then
+  exec /bin/bash "$script" "$@"
+fi
+
+interp="$(find_bash4)" || die "'macos $cmd' needs bash 4+; run 'brew install bash' (or 'macos bootstrap') first."
+exec "$interp" "$script" "$@"

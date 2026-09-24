@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# macos:summary=Apply or check the declared macOS defaults
+# macos:usage=macos defaults apply|check [--dry-run]
+
+# shellcheck source=lib/common.sh
+. "${MACOS_ROOT:=$(cd -- "$(dirname -- "$0")/.." && pwd -P)}/lib/common.sh"
+
+not_implemented 5

@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# macos:summary=Add, remove or adopt apps in a profile Brewfile
+# macos:usage=macos apps add|remove|adopt [<name>] [--cask] [--profile <p>] [--dry-run]
+
+# shellcheck source=lib/common.sh
+. "${MACOS_ROOT:=$(cd -- "$(dirname -- "$0")/.." && pwd -P)}/lib/common.sh"
+
+not_implemented 3

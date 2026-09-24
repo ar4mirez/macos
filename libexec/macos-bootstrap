@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# macos:summary=First-run setup of a new Mac (profile, security, apps, dotfiles, defaults, identity)
+# macos:usage=macos bootstrap [--profile base|work|personal] [--yes]
+# macos:bash=3
+
+# shellcheck source=lib/common.sh
+. "${MACOS_ROOT:=$(cd -- "$(dirname -- "$0")/.." && pwd -P)}/lib/common.sh"
+
+not_implemented 2

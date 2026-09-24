@@ -1,0 +1,30 @@
+#!/bin/bash
+# Test double for system tools (defaults, brew, sudo, ...). test/run.sh symlinks
+# it under each tool's name, first on PATH. It records the call and never
+# touches the system.
+#
+#   STUB_LOG            file that receives "<tool> <args...>" per call
+#   STUB_<TOOL>_OUT     text to print on stdout (tool name uppercased, - → _)
+#   STUB_<TOOL>_RC      exit code (default 0; `defaults read` defaults to 1,
+#                       i.e. "key does not exist")
+
+tool="${0##*/}"
+var="$(printf '%s' "$tool" | tr '[:lower:]-' '[:upper:]_')"
+
+printf '%s %s\n' "$tool" "$*" >>"${STUB_LOG:-/dev/null}"
+
+out_var="STUB_${var}_OUT"
+rc_var="STUB_${var}_RC"
+
+if [ -n "${!out_var:-}" ]; then
+  printf '%s\n' "${!out_var}"
+fi
+
+rc="${!rc_var:-}"
+if [ -z "$rc" ]; then
+  rc=0
+  if [ "$tool" = defaults ] && [ "${1:-}" = read ]; then
+    rc=1
+  fi
+fi
+exit "$rc"

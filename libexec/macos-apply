@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# macos:summary=Converge apps, dotfiles, defaults and runtimes to the declared state
+# macos:usage=macos apply [--prune] [--dry-run]
+
+# shellcheck source=lib/common.sh
+. "${MACOS_ROOT:=$(cd -- "$(dirname -- "$0")/.." && pwd -P)}/lib/common.sh"
+
+not_implemented 3
