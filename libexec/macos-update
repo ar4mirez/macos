@@ -1,8 +1,73 @@
 #!/usr/bin/env bash
 # macos:summary=Pull engine and dotfiles, run migrations, then apply
-# macos:usage=macos update [--dry-run]
+# macos:usage=macos update [--dry-run] [--yes]
+#
+# The engine only fast-forwards (it is never edited in place). The dotfiles
+# repo is rebased with --autostash so uncommitted edits survive; a conflict
+# aborts the rebase and stops. After migrations, `macos apply` runs from
+# the freshly pulled engine.
 
 # shellcheck source=lib/common.sh
 . "${MACOS_ROOT:=$(cd -- "$(dirname -- "$0")/.." && pwd -P)}/lib/common.sh"
+for _lib in run prompt lock profile repo engine; do
+  # shellcheck source=/dev/null
+  . "$MACOS_ROOT/lib/$_lib.sh"
+done
+unset _lib
 
-not_implemented 7
+apply_args=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -n | --dry-run) MACOS_DRY_RUN=1; apply_args+=(--dry-run) ;;
+    -y | --yes) MACOS_YES=1; apply_args+=(--yes) ;;
+    *) die "unknown option: $1 (see 'macos update --help')" ;;
+  esac
+  shift
+done
+export MACOS_DRY_RUN MACOS_YES
+
+require_profile
+lock_acquire
+dry_run || log_to_file
+dry_run && say "Dry run: fetching to preview, but nothing will be changed."
+
+# incoming <dir> [git -c flags...] — fetch, then list commits not yet merged.
+incoming() {
+  local dir="$1"
+  shift
+  git "$@" -C "$dir" fetch --quiet || { warn "could not fetch $dir"; return 0; }
+  git -C "$dir" log --oneline 'HEAD..@{u}' 2>/dev/null || true
+}
+
+step "Engine"
+new="$(incoming "$MACOS_ROOT" -c credential.helper=)"
+if [ -z "$new" ]; then
+  skip "engine up to date ($(cat "$MACOS_ROOT/version"))"
+else
+  printf '%s\n' "$new" | sed 's/^/    /' >&2
+  run git -c credential.helper= -C "$MACOS_ROOT" merge --ff-only --quiet '@{u}' ||
+    die "the engine at $MACOS_ROOT has local changes or diverged; it is not meant to be edited there"
+  ok "engine updated to $(cat "$MACOS_ROOT/version")"
+fi
+
+step "Dotfiles"
+new="$(incoming "$MACOS_DOTFILES" "${GIT_GH_ONLY[@]}")"
+if [ -z "$new" ]; then
+  skip "dotfiles up to date"
+else
+  printf '%s\n' "$new" | sed 's/^/    /' >&2
+  if ! run git "${GIT_GH_ONLY[@]}" -C "$MACOS_DOTFILES" rebase --autostash --quiet '@{u}'; then
+    git -C "$MACOS_DOTFILES" rebase --abort >/dev/null 2>&1 || true
+    die "your local dotfiles changes conflict with the remote; resolve in $MACOS_DOTFILES (nothing was applied)"
+  fi
+  ok "dotfiles updated"
+fi
+
+step "Migrations"
+migrations_run
+engine_link_cli
+
+# Hand over to the (possibly new) engine. exec keeps our pid, so release
+# the lock first or apply would find it held by itself.
+lock_release
+exec "$MACOS_ROOT/bin/macos" apply ${apply_args[@]+"${apply_args[@]}"}

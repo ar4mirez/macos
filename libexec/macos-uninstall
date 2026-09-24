@@ -1,8 +1,58 @@
 #!/usr/bin/env bash
 # macos:summary=Unlink dotfiles and remove the engine (apps are left alone)
-# macos:usage=macos uninstall [--dry-run]
+# macos:usage=macos uninstall [--dry-run] [--yes]
+#
+# Removes what the engine put in place for itself: the dotfile symlinks,
+# ~/.local/bin/macos and the engine clone. Deliberately kept: installed
+# apps, macOS settings, Touch ID for sudo, ~/.dotfiles, and
+# ~/.local/state/macos, which holds the backups of files the dotfiles
+# replaced.
 
 # shellcheck source=lib/common.sh
 . "${MACOS_ROOT:=$(cd -- "$(dirname -- "$0")/.." && pwd -P)}/lib/common.sh"
+for _lib in run prompt lock profile dotfiles engine; do
+  # shellcheck source=/dev/null
+  . "$MACOS_ROOT/lib/$_lib.sh"
+done
+unset _lib
 
-not_implemented 7
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -n | --dry-run) MACOS_DRY_RUN=1 ;;
+    -y | --yes) MACOS_YES=1 ;;
+    *) die "unknown option: $1 (see 'macos uninstall --help')" ;;
+  esac
+  shift
+done
+export MACOS_DRY_RUN MACOS_YES
+
+engine_removable || die "$MACOS_ROOT does not look like an engine clone; refusing to remove it"
+lock_acquire
+dry_run && say "Dry run: nothing will be changed."
+
+say "This unlinks your dotfiles and removes the engine at $MACOS_ROOT."
+say "Apps, macOS settings, ~/.dotfiles and $MACOS_STATE (with backups) stay."
+dry_run || confirm "Uninstall?" || { skip "nothing changed"; exit 0; }
+
+step "Dotfiles"
+if [ -n "${MACOS_PROFILE:-}" ] && [ -d "$MACOS_DOTFILES/macos/profiles/base" ] && command -v stow >/dev/null 2>&1; then
+  dotfiles_unlink
+else
+  skip "no linked dotfiles to remove"
+fi
+if [ -L "$HOME/.1password/agent.sock" ]; then
+  run rm -f "$HOME/.1password/agent.sock"
+fi
+
+step "Engine"
+if engine_cli_linked; then
+  run rm -f "$MACOS_CLI_LINK"
+fi
+lock_release
+run rm -rf "$MACOS_ROOT"
+ok "engine removed"
+
+if [ -d "$MACOS_STATE/backup" ]; then
+  say "Files the dotfiles replaced are backed up in $MACOS_STATE/backup/; copy back what you need."
+fi
+say "Open a new terminal: your shell config is no longer linked."

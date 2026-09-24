@@ -1,8 +1,151 @@
 #!/usr/bin/env bash
 # macos:summary=Report what is actually true on this Mac, plus pending manual steps
 # macos:usage=macos doctor
+#
+# Read-only, except that pending manual steps it can see are done (1Password
+# agent, default browser, Brave policy, Tailscale login) are cleared.
+# Exits 1 when something is broken; warnings (drift, pending GUI steps,
+# uncommitted dotfiles) do not fail it.
 
 # shellcheck source=lib/common.sh
 . "${MACOS_ROOT:=$(cd -- "$(dirname -- "$0")/.." && pwd -P)}/lib/common.sh"
+for _lib in run pending profile brew dotfiles defaults system identity engine; do
+  # shellcheck source=/dev/null
+  . "$MACOS_ROOT/lib/$_lib.sh"
+done
+unset _lib
+[ $# -eq 0 ] || die "macos doctor takes no options"
 
-not_implemented 7
+OKS=0 WARNS=0 FAILS=0
+good() { OKS=$((OKS + 1)); printf '  %sok%s    %s\n' "$_C_GREEN" "$_C_RESET" "$*"; }
+meh() { WARNS=$((WARNS + 1)); printf '  %swarn%s  %s\n' "$_C_YELLOW" "$_C_RESET" "$*"; }
+bad() { FAILS=$((FAILS + 1)); printf '  %sFAIL%s  %s\n' "$_C_RED" "$_C_RESET" "$*"; }
+section() { printf '\n%s\n' "$*"; }
+
+section "Engine"
+good "version $(cat "$MACOS_ROOT/version") at $MACOS_ROOT"
+if [ -n "$(git -C "$MACOS_ROOT" status --porcelain 2>/dev/null)" ]; then
+  meh "the engine has local edits; 'macos update' will refuse to fast-forward"
+fi
+if engine_cli_linked; then
+  good "'macos' is on PATH"
+else
+  meh "'macos' is not linked into ~/.local/bin (run 'macos update')"
+fi
+if [ -n "$(migrations_pending)" ]; then
+  meh "migrations pending: $(migrations_pending | tr '\n' ' ')(run 'macos update')"
+fi
+
+section "Profile"
+if [ -z "${MACOS_PROFILE:-}" ] || [ ! -d "$(profiles_dir)/base" ]; then
+  bad "no profile or no dotfiles at $MACOS_DOTFILES; run 'macos bootstrap'"
+  printf '\n%d ok, %d warnings, %d failures\n' "$OKS" "$WARNS" "$FAILS"
+  exit 1
+fi
+good "profile $MACOS_PROFILE, dotfiles at $MACOS_DOTFILES"
+
+section "Security"
+if fdesetup status 2>/dev/null | grep -q 'FileVault is On'; then good "FileVault on"; else bad "FileVault is off"; fi
+if csrutil status 2>/dev/null | grep -q 'enabled'; then good "System Integrity Protection on"; else meh "System Integrity Protection is not fully enabled"; fi
+if "$SOCKETFILTERFW" --getglobalstate 2>/dev/null | grep -q 'is enabled'; then good "firewall on"; else meh "firewall off ('macos bootstrap' turns it on)"; fi
+if grep -q 'pam_tid.so' "$PAM_SUDO_LOCAL" 2>/dev/null; then good "Touch ID for sudo"; else meh "Touch ID for sudo not set up"; fi
+
+section "Apps"
+brewfile="$(mktemp "${TMPDIR:-/tmp}/macos-doctor.XXXXXX")"
+on_exit "rm -f '$brewfile'"
+# shellcheck disable=SC2046
+brew_merge "$brewfile" $(profile_brewfiles "$MACOS_PROFILE")
+missing="$(brew_missing "$brewfile")"
+if [ -z "$missing" ]; then
+  good "every declared app is installed ($(grep -cE '^(brew|cask|mas) ' "$brewfile") entries)"
+else
+  bad "declared but not installed: $(printf '%s' "$missing" | awk '{ print $2 }' | tr '\n' ' ')(run 'macos apply')"
+fi
+undeclared="$(env "${BREW_CLEANUP_ENV[@]}" brew bundle cleanup --file="$brewfile" </dev/null 2>/dev/null | grep -vE '^(Would|Run )' || true)"
+if [ -n "$undeclared" ]; then
+  meh "installed but undeclared: $(printf '%s' "$undeclared" | tr '\n' ' ')('macos apps adopt' or 'macos apply --prune')"
+fi
+if brew list --cask claude-code >/dev/null 2>&1; then
+  bad "the claude-code cask is installed; it shadows the native Claude Code in ~/.local/bin"
+fi
+x86=""
+for app in "${MACOS_APPLICATIONS_DIRS%% *}"/*.app; do
+  [ -d "$app" ] || continue
+  exe="$(plutil -extract CFBundleExecutable raw "$app/Contents/Info.plist" 2>/dev/null || true)"
+  [ -n "$exe" ] && [ -f "$app/Contents/MacOS/$exe" ] || continue
+  lipo -archs "$app/Contents/MacOS/$exe" 2>/dev/null | grep -q arm64 || x86="$x86 $(basename "$app" .app)"
+done
+if [ -n "$x86" ]; then meh "Intel-only apps (need Rosetta, which is going away):$x86"; else good "every app runs natively on Apple silicon"; fi
+
+section "Dotfiles"
+status_out="$(dotfiles_status 2>/dev/null || true)"
+notlinked="$(printf '%s\n' "$status_out" | awk '$1 == "missing" || $1 == "conflict"')"
+if [ -z "$notlinked" ]; then
+  good "all $(printf '%s\n' "$status_out" | grep -c '^  linked') dotfiles linked"
+else
+  bad "not linked: $(printf '%s' "$notlinked" | awk '{ print $2 }' | tr '\n' ' ')(run 'macos dotfiles link')"
+fi
+if printf '%s\n' "$status_out" | grep -q '^  dirty'; then
+  meh "$MACOS_DOTFILES has uncommitted changes"
+fi
+if [ -e "$HOME/.gitconfig" ]; then
+  meh "a ~/.gitconfig exists; git reads it besides ~/.config/git/config (move it into config.local)"
+fi
+if [ -x "$HOME/.local/bin/claude" ]; then
+  if [ "$(command -v claude)" = "$HOME/.local/bin/claude" ]; then
+    good "claude resolves to ~/.local/bin/claude"
+  else
+    meh "claude resolves to $(command -v claude || echo nothing), not ~/.local/bin/claude"
+  fi
+fi
+if command -v mise >/dev/null 2>&1; then
+  if [ -n "$(mise ls --missing 2>/dev/null)" ]; then meh "mise runtimes missing (run 'macos apply')"; else good "mise runtimes installed"; fi
+fi
+
+section "Settings"
+drift="$( { defaults_check; system_check; } 2>/dev/null || true)"
+if [ -z "$drift" ]; then
+  good "macOS settings match the declared defaults"
+else
+  meh "$(printf '%s\n' "$drift" | grep -c 'drift') setting(s) differ ('macos defaults check' for details)"
+fi
+# Clear pending steps that are visibly done.
+[ "$(browser_state)" = ok ] && pending_done browser
+[ "$(brave_policy_state)" = ok ] && pending_done brave-policy
+if [ -x "$TAILSCALE_CLI" ] && "$TAILSCALE_CLI" status >/dev/null 2>&1; then
+  pending_done tailscale
+fi
+
+section "Identity"
+orgs="$(orgs_lines 2>/dev/null || true)"
+if [ -z "$orgs" ]; then
+  meh "no identities in orgs.conf; git uses the stowed defaults"
+elif ! agent_ready; then
+  meh "1Password SSH agent not answering; signing and ssh config are waiting ('macos identity')"
+else
+  pending_done 1password
+  good "1Password SSH agent answering with $(agent_keys | wc -l | tr -d ' ') key(s)"
+  if [ -f "$IDENTITY_VERIFIED" ]; then
+    if ssh -T -o BatchMode=yes -o ConnectTimeout=5 git@github.com 2>&1 | grep -q 'successfully authenticated'; then
+      good "ssh to GitHub authenticates through 1Password"
+    else
+      meh "ssh to GitHub did not authenticate"
+    fi
+  else
+    meh "identity not finished; run 'macos identity'"
+  fi
+fi
+
+section "Manual steps"
+if [ -z "$(pending_list)" ]; then
+  good "nothing pending"
+else
+  while IFS= read -r p; do meh "$p"; done <<EOF
+$(pending_list)
+EOF
+fi
+
+printf '\n%d ok, %d warnings, %d failures\n' "$OKS" "$WARNS" "$FAILS"
+if [ "$FAILS" -gt 0 ]; then
+  exit 1
+fi

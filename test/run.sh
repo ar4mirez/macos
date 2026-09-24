@@ -12,7 +12,7 @@ ROOT="$(cd -- "$(dirname -- "$0")/.." && pwd -P)"
 SANDBOX="$(mktemp -d "${TMPDIR:-/tmp}/macos-test.XXXXXX")"
 trap 'rm -rf "$SANDBOX"' EXIT
 
-STUBBED_TOOLS="defaults killall osascript scutil sudo brew mas dockutil duti softwareupdate hidutil pmset gh op git curl xcode-select uname mise open ssh-add"
+STUBBED_TOOLS="defaults killall osascript scutil sudo brew mas dockutil duti softwareupdate hidutil pmset gh op git curl xcode-select uname mise open ssh-add fdesetup csrutil ssh lipo"
 
 REAL_HOME="$HOME"
 export HOME="$SANDBOX/home"
@@ -37,6 +37,9 @@ export OP_SSH_SIGN="$SANDBOX/bin/op-ssh-sign"
 ln -sf "$ROOT/test/stubs/defaults" "$SANDBOX/bin/defaults"
 export STUB_DEFAULTS_DB="$SANDBOX/defaults.db"
 export MANAGED_PREFS_DIR="$SANDBOX/managed"
+export MACOS_MIGRATIONS_DIR="$SANDBOX/migrations"
+ln -s "$ROOT/test/stubs/stub" "$SANDBOX/bin/tailscale-cli"
+export TAILSCALE_CLI="$SANDBOX/bin/tailscale-cli"
 export PAM_SUDO_LOCAL="$SANDBOX/etc/sudo_local"
 export HOMEBREW_PREFIX="$SANDBOX/homebrew"
 export MACOS_SUDO_REFRESH=1
@@ -202,8 +205,9 @@ check "bootstrap is dispatched under bash 3.2" t_bootstrap_runs_on_bash32
 t_bash4_override() {
   [ -n "$BASH4" ] || { echo "no bash 4 available"; return 0; }
   local rc=0
-  MACOS_BASH="$BASH4" "$M" doctor >"$SANDBOX/o" 2>&1 || rc=$?
-  [ "$rc" -eq 2 ] && grep -q 'not implemented' "$SANDBOX/o"
+  MACOS_BASH="$BASH4" "$M" apply --frobnicate >"$SANDBOX/o" 2>&1 || rc=$?
+  # Reaching the subcommand's own argument check proves it ran under bash 4.
+  [ "$rc" -eq 1 ] && grep -q "unknown option: --frobnicate" "$SANDBOX/o"
 }
 check "bash-4 subcommands run under MACOS_BASH" t_bash4_override
 
@@ -495,7 +499,7 @@ check "bootstrap rejects an unknown profile" t_bootstrap_rejects_unknown_profile
 
 t_bootstrap_full() {
   bootstrap_env
-  STUB_BREW_BUNDLE_CHECK_RC=1 STUB_GH_OUT="  - Token scopes: 'admin:public_key', 'admin:ssh_signing_key', 'repo'" \
+  STUB_TAILSCALE_CLI_RC=1 STUB_BREW_BUNDLE_CHECK_RC=1 STUB_GH_OUT="  - Token scopes: 'admin:public_key', 'admin:ssh_signing_key', 'repo'" \
     "$M" bootstrap --yes --profile work --hostname "Studio Mac" >"$SANDBOX/o" 2>&1 || { cat "$SANDBOX/o"; return 1; }
   local L="$STUB_LOG" E="$MACOS_STATE/machine.env" B="$MACOS_STATE/Brewfile"
   grep -qx 'MACOS_PROFILE="work"' "$E" && grep -qx 'MACOS_HOSTNAME="Studio Mac"' "$E" || { echo "machine.env"; cat "$E"; return 1; }
@@ -1195,6 +1199,155 @@ t_apply_never_waits_for_agent() {
   grep -q '1Password SSH agent is not answering' "$SANDBOX/o" && ! grep -q '^open -a 1Password' "$STUB_LOG"
 }
 check "apply renders identities but never waits on 1Password" t_apply_never_waits_for_agent
+
+# ---------------------------------------------------------------------------
+section "migrations and update"
+
+migrations_env() {
+  phase3_env
+  rm -rf "$MACOS_MIGRATIONS_DIR" && mkdir -p "$MACOS_MIGRATIONS_DIR"
+  for n in 200 100; do
+    printf 'echo "ran %s $MACOS_PROFILE" >>"%s/mig.log"\n' "$n" "$SANDBOX" >"$MACOS_MIGRATIONS_DIR/$n.sh"
+  done
+  rm -f "$SANDBOX/mig.log"
+}
+
+t_update_runs_migrations_then_apply() {
+  migrations_env
+  "$M" update --yes >"$SANDBOX/o" 2>&1 || { cat "$SANDBOX/o"; return 1; }
+  [ "$(cat "$SANDBOX/mig.log")" = "$(printf 'ran 100 work\nran 200 work')" ] &&
+    [ -f "$MACOS_STATE/migrations/100" ] && [ -f "$MACOS_STATE/migrations/200" ] &&
+    grep -q 'apply finished' "$SANDBOX/o" && ! grep -q 'in progress' "$SANDBOX/o" &&
+    [ "$(readlink "$HOME/.local/bin/macos")" = "$ROOT/bin/macos" ] || { cat "$SANDBOX/o"; return 1; }
+  "$M" update --yes >"$SANDBOX/o" 2>&1 && [ "$(wc -l <"$SANDBOX/mig.log" | tr -d ' ')" -eq 2 ] && grep -q 'no pending migrations' "$SANDBOX/o"
+}
+check "update runs pending migrations once, in order, then apply" t_update_runs_migrations_then_apply
+
+t_migration_failure_stops() {
+  migrations_env
+  printf 'exit 3\n' >"$MACOS_MIGRATIONS_DIR/150.sh"
+  "$M" update --yes >"$SANDBOX/o" 2>&1 && return 1
+  grep -q 'migration 150.sh failed' "$SANDBOX/o" && [ -f "$MACOS_STATE/migrations/100" ] &&
+    [ ! -f "$MACOS_STATE/migrations/150" ] && [ ! -f "$MACOS_STATE/migrations/200" ] && ! grep -q 'ran 200' "$SANDBOX/mig.log"
+}
+check "a failing migration stops before later ones and stays pending" t_migration_failure_stops
+
+t_update_pulls() {
+  migrations_env
+  STUB_GIT_OUT="abc1234 an incoming commit" "$M" update --yes >"$SANDBOX/o" 2>&1 || { cat "$SANDBOX/o"; return 1; }
+  grep -q "^git -c credential.helper= -C $ROOT merge --ff-only --quiet @{u}" "$STUB_LOG" &&
+    grep -q "^git -c credential.helper= -c credential.helper=!gh auth git-credential -C $MACOS_DOTFILES rebase --autostash --quiet @{u}" "$STUB_LOG" ||
+    { cat "$STUB_LOG"; return 1; }
+}
+check "update fast-forwards the engine and rebases dotfiles with autostash" t_update_pulls
+
+t_update_dry_run() {
+  migrations_env
+  STUB_GIT_OUT="abc1234 an incoming commit" "$M" update --dry-run >"$SANDBOX/o" 2>&1 || { cat "$SANDBOX/o"; return 1; }
+  ! grep -qE ' (merge|rebase) ' "$STUB_LOG" && [ ! -f "$SANDBOX/mig.log" ] && [ ! -d "$MACOS_STATE/migrations" ] &&
+    grep -q 'would run: .*100.sh' "$SANDBOX/o" && grep -q 'apply finished (dry run)' "$SANDBOX/o"
+}
+check "update --dry-run only previews" t_update_dry_run
+
+t_bootstrap_marks_migrations() {
+  bootstrap_env
+  rm -rf "$MACOS_MIGRATIONS_DIR" && mkdir -p "$MACOS_MIGRATIONS_DIR" && printf 'touch "%s/ran"\n' "$SANDBOX" >"$MACOS_MIGRATIONS_DIR/100.sh"
+  rm -f "$SANDBOX/ran"
+  STUB_GH_OUT="  - Token scopes: 'admin:public_key', 'admin:ssh_signing_key'" \
+    "$M" bootstrap --yes --profile work --hostname x >"$SANDBOX/o" 2>&1 || { cat "$SANDBOX/o"; return 1; }
+  [ -f "$MACOS_STATE/migrations/100" ] && [ ! -f "$SANDBOX/ran" ] && grep -q '==> Health check' "$SANDBOX/o"
+}
+check "a fresh bootstrap marks migrations done without running them" t_bootstrap_marks_migrations
+
+# ---------------------------------------------------------------------------
+section "uninstall"
+
+t_uninstall() {
+  dotfiles_env
+  local copy="$SANDBOX/engine-copy"
+  rm -rf "$copy" && cp -R "$ROOT" "$copy" && copy="$(cd "$copy" && pwd -P)"
+  "$copy/bin/macos" dotfiles link >/dev/null 2>&1
+  mkdir -p "$HOME/.local/bin" && ln -sfn "$copy/bin/macos" "$HOME/.local/bin/macos"
+  mkdir -p "$MACOS_STATE/backup/1" && echo keep >"$MACOS_STATE/backup/1/.zshrc"
+  "$copy/bin/macos" uninstall --yes >"$SANDBOX/o" 2>&1 || { cat "$SANDBOX/o"; return 1; }
+  [ ! -e "$copy" ] && [ ! -e "$HOME/.zshrc" ] && [ ! -L "$HOME/.local/bin/macos" ] &&
+    [ -f "$MACOS_DOTFILES/zsh/.zshrc" ] && [ "$(cat "$MACOS_STATE/backup/1/.zshrc")" = keep ]
+}
+check "uninstall unlinks dotfiles, removes the engine, keeps backups and the repo" t_uninstall
+
+t_uninstall_guard() {
+  dotfiles_env
+  local copy="$SANDBOX/not-an-engine"
+  rm -rf "$copy" && cp -R "$ROOT" "$copy" && rm -rf "$copy/.git"
+  "$copy/bin/macos" uninstall --yes >"$SANDBOX/o" 2>&1 && return 1
+  [ -d "$copy" ] && grep -q 'does not look like an engine clone' "$SANDBOX/o"
+}
+check "uninstall refuses to delete a directory that is not an engine clone" t_uninstall_guard
+
+t_uninstall_dry_run() {
+  dotfiles_env
+  local copy="$SANDBOX/engine-copy2"
+  rm -rf "$copy" && cp -R "$ROOT" "$copy" && copy="$(cd "$copy" && pwd -P)"
+  "$copy/bin/macos" uninstall --dry-run >"$SANDBOX/o" 2>&1 || { cat "$SANDBOX/o"; return 1; }
+  [ -d "$copy" ] && grep -q "would run: rm -rf $copy" "$SANDBOX/o"
+}
+check "uninstall --dry-run removes nothing" t_uninstall_dry_run
+
+# ---------------------------------------------------------------------------
+section "doctor"
+
+doctor_env() {
+  dotfiles_env
+  "$M" dotfiles link >/dev/null 2>&1
+  printf 'auth sufficient pam_tid.so\n' >"$PAM_SUDO_LOCAL"
+  mkdir -p "$HOME/.local/bin" && ln -sfn "$ROOT/bin/macos" "$HOME/.local/bin/macos"
+  export STUB_FDESETUP_OUT="FileVault is On." STUB_CSRUTIL_OUT="System Integrity Protection status: enabled."
+  export STUB_SOCKETFILTERFW_OUT="Firewall is enabled. (State = 1)" STUB_BREW_LIST___CASK_RC=1
+  : >"$STUB_LOG"
+}
+
+t_doctor_healthy() {
+  doctor_env
+  ( "$M" doctor >"$SANDBOX/o" 2>&1 ) || { cat "$SANDBOX/o"; return 1; }
+  grep -q ' 0 failures' "$SANDBOX/o" && grep -q 'ok    FileVault on' "$SANDBOX/o" &&
+    grep -q 'ok    every declared app is installed' "$SANDBOX/o" && grep -q 'ok    all .* dotfiles linked' "$SANDBOX/o"
+}
+check "doctor passes on a healthy machine" t_doctor_healthy
+
+t_doctor_failures() {
+  doctor_env
+  rm "$HOME/.zshrc"
+  (
+    STUB_FDESETUP_OUT="FileVault is Off." STUB_BREW_BUNDLE_CHECK_RC=1 STUB_BREW_BUNDLE_CHECK_OUT="→ Cask slack needs to be installed." \
+      "$M" doctor >"$SANDBOX/o" 2>&1
+  ) && return 1
+  grep -q 'FAIL  FileVault is off' "$SANDBOX/o" && grep -q 'FAIL  declared but not installed: slack' "$SANDBOX/o" &&
+    grep -q 'FAIL  not linked: ~/.zshrc' "$SANDBOX/o" && grep -q ' 3 failures' "$SANDBOX/o" || { cat "$SANDBOX/o"; return 1; }
+}
+check "doctor fails on FileVault off, missing apps, unlinked dotfiles" t_doctor_failures
+
+t_doctor_pending() {
+  doctor_env
+  printf 'tailscale|Log in to Tailscale\nbrowser|Confirm browser\nother|Do the other thing\n' >"$MACOS_STATE/pending"
+  ( STUB_TAILSCALE_CLI_RC=0 "$M" doctor >"$SANDBOX/o" 2>&1 ) || { cat "$SANDBOX/o"; return 1; }
+  grep -q 'warn  Do the other thing' "$SANDBOX/o" && ! grep -q 'Log in to Tailscale' "$SANDBOX/o" &&
+    [ "$(cat "$MACOS_STATE/pending")" = "other|Do the other thing" ]
+}
+check "doctor lists pending steps and clears the ones that are visibly done" t_doctor_pending
+
+t_doctor_claude_code_cask() {
+  doctor_env
+  ( STUB_BREW_LIST___CASK_RC=0 "$M" doctor >"$SANDBOX/o" 2>&1 ) && return 1
+  grep -q 'claude-code cask is installed' "$SANDBOX/o"
+}
+check "doctor flags the claude-code cask shadowing the native install" t_doctor_claude_code_cask
+
+t_doctor_no_profile() {
+  phase3_env; rm -f "$MACOS_STATE/machine.env"
+  ( "$M" doctor >"$SANDBOX/o" 2>&1 ) && return 1
+  grep -q "FAIL  no profile" "$SANDBOX/o"
+}
+check "doctor fails clearly before bootstrap" t_doctor_no_profile
 
 # ---------------------------------------------------------------------------
 section "boot.sh"

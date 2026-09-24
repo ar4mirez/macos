@@ -8,7 +8,7 @@
 
 # shellcheck source=lib/common.sh
 . "${MACOS_ROOT:=$(cd -- "$(dirname -- "$0")/.." && pwd -P)}/lib/common.sh"
-for _lib in run prompt lock pending sudo security brew repo gh profile dotfiles defaults system identity; do
+for _lib in run prompt lock pending sudo security brew repo gh profile dotfiles defaults system identity engine; do
   # shellcheck source=/dev/null
   . "$MACOS_ROOT/lib/$_lib.sh"
 done
@@ -65,6 +65,7 @@ if command -v gh >/dev/null 2>&1; then
 else
   run brew install gh
 fi
+engine_link_cli
 
 # --- 3. Security baseline -----------------------------------------------------
 step "Security baseline"
@@ -135,12 +136,19 @@ else
   identity_apply
 fi
 
-# --- Not built yet --------------------------------------------------------------
-step "Remaining setup"
-warn "Coming in a later phase: migrations + doctor (7)."
-say "Open a new terminal window (or run: exec zsh -l) to load the linked shell config."
-if [ -n "$(pending_list)" ]; then
-  say "Manual steps still to do:"
-  pending_list | sed 's/^/  - /' >&2
+# --- 10. Migrations and a health check --------------------------------------------
+step "Migrations"
+if [ -d "$MIGRATIONS_STATE" ]; then
+  migrations_run
+else
+  migrations_mark_all
 fi
-ok "bootstrap finished the implemented phases"
+
+step "Health check"
+if dry_run; then
+  skip "would run 'macos doctor'"
+else
+  "$MACOS_ROOT/bin/macos" doctor || warn "'macos doctor' found problems (see above)"
+fi
+say "Open a new terminal window (or run: exec zsh -l) to load the linked shell config."
+ok "bootstrap finished"

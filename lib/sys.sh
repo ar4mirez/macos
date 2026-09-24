@@ -23,3 +23,6 @@
 # 1Password's SSH agent socket (the path has a space, so ssh config and
 # SSH_AUTH_SOCK use the ~/.1password/agent.sock symlink instead).
 : "${OP_AGENT_SOCK:=$HOME/Library/Group Containers/2BUA8C4S2C.com.1password/t/agent.sock}"
+
+# Tailscale's CLI inside the app bundle (used to detect a finished login).
+: "${TAILSCALE_CLI:=/Applications/Tailscale.app/Contents/MacOS/Tailscale}"

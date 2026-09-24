@@ -54,9 +54,3 @@ step() {
   MACOS_STEP="$*"
   say "$*"
 }
-
-# not_implemented <phase> — placeholder body for commands still being built.
-not_implemented() {
-  warn "'macos ${0##*/macos-}' is not implemented yet (planned for phase $1)."
-  exit 2
-}
