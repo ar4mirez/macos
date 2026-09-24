@@ -410,6 +410,24 @@ t_analytics_idempotent() {
 }
 check "analytics step changes nothing when already off" t_analytics_idempotent
 
+t_sudo_keepalive_quiet_exit() {
+  # Regression: the killed keepalive loop printed "Terminated: 15" when the
+  # lock's exit hook ran after it.
+  local i
+  for i in 1 2 3; do
+    /bin/bash -c '. "$1/lib/common.sh"; . "$1/lib/run.sh"; . "$1/lib/lock.sh"; . "$1/lib/sudo.sh"; lock_acquire kq; sudo_keepalive; sleep 0.2; exit 0' _ "$ROOT" >"$SANDBOX/o" 2>&1 || return 1
+    ! grep -q Terminated "$SANDBOX/o" || { cat "$SANDBOX/o"; return 1; }
+  done
+}
+check "sudo keepalive stops silently at exit" t_sudo_keepalive_quiet_exit
+
+t_sudo_keepalive_stops() {
+  /bin/bash -c '. "$1/lib/common.sh"; . "$1/lib/run.sh"; . "$1/lib/sudo.sh"; sudo_keepalive; echo "$_MACOS_SUDO_PID" >"$2/kpid"' _ "$ROOT" "$SANDBOX" 2>/dev/null
+  sleep 0.3
+  ! kill -0 "$(cat "$SANDBOX/kpid")" 2>/dev/null
+}
+check "sudo keepalive loop is gone after exit" t_sudo_keepalive_stops
+
 # ---------------------------------------------------------------------------
 section "Pending steps"
 

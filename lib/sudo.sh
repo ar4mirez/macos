@@ -19,6 +19,9 @@ sudo_keepalive() {
     done
   ) &
   _MACOS_SUDO_PID=$!
+  # Not a job bash should report on: killing it at exit is expected, and a
+  # tracked job would print "Terminated: 15" during the next exit hook.
+  disown "$_MACOS_SUDO_PID" 2>/dev/null || true
   on_exit 'kill "$_MACOS_SUDO_PID" 2>/dev/null || true'
 }
 
