@@ -26,8 +26,13 @@ words() { tr '\n' ' ' | sed 's/  */ /g; s/^ //; s/ $//'; }
 
 section "Engine"
 good "version $(cat "$MACOS_ROOT/version") at $MACOS_ROOT"
-if [ -n "$(git -C "$MACOS_ROOT" status --porcelain 2>/dev/null)" ]; then
-  meh "the engine has local edits; 'macos update' will refuse to fast-forward"
+if engine_is_dev; then
+  meh "dev mode: \`macos\` runs your clone at $MACOS_ROOT ('macos dev unlink' to go back)"
+elif [ -n "$(git -C "$MACOS_ROOT" status --porcelain 2>/dev/null)" ]; then
+  meh "the installed engine has local edits; 'macos update' will refuse to fast-forward (develop in a clone: 'macos dev link')"
+fi
+if dotfiles_is_dev; then
+  meh "dev mode: dotfiles are linked from your clone at $MACOS_DOTFILES ('macos dev unlink' to go back)"
 fi
 if engine_cli_linked; then
   good "'macos' is on PATH"
@@ -106,7 +111,7 @@ if [ -z "$notlinked" ]; then
 else
   bad "not linked: $(awk '{ print $2 }' <<<"$notlinked" | words) (run 'macos dotfiles link')"
 fi
-if grep -q '^  dirty' <<<"$status_out"; then
+if grep -q '^  dirty' <<<"$status_out" && ! dotfiles_is_dev; then
   meh "$MACOS_DOTFILES has uncommitted changes"
 fi
 if [ -e "$HOME/.gitconfig" ]; then

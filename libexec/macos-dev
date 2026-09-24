@@ -1,0 +1,194 @@
+#!/usr/bin/env bash
+# macos:summary=Develop the engine or dotfiles from your own clones: status, link, unlink
+# macos:usage=macos dev status | link [--engine <path>] [--dotfiles <path>] | unlink [--engine] [--dotfiles] [--dry-run]
+#
+# Every Mac runs the INSTALLED copies: the engine in ~/.local/share/macos
+# (MACOS_INSTALL_DIR) and the dotfiles clone the Stow links point into
+# (~/.dotfiles by default). Changes reach them the way they reach any other
+# Mac: commit and push from your development clones, then `macos update`.
+#
+# To try changes before pushing, link this Mac to the development clones:
+#
+#   link --engine <path>     the `macos` command runs <path>/bin/macos
+#   link --dotfiles <path>   the Stow links point into <path>, so edits there
+#                            are live (machine.env remembers the installed one)
+#   unlink [--engine] [--dotfiles]   back to the installed copies (both
+#                                    when neither is given)
+#
+# The paths are remembered (MACOS_DEV_ENGINE / MACOS_DEV_DOTFILES in
+# machine.env), so later `macos dev link` needs no arguments. While linked,
+# `macos update` never pulls into your clones (they are yours), but keeps
+# the installed copies current; `doctor` reminds you that dev mode is on.
+
+# shellcheck source=lib/common.sh
+. "${MACOS_ROOT:=$(cd -- "$(dirname -- "$0")/.." && pwd -P)}/lib/common.sh"
+for _lib in run lock profile dotfiles engine; do
+  # shellcheck source=/dev/null
+  . "$MACOS_ROOT/lib/$_lib.sh"
+done
+unset _lib
+
+action="${1:-status}"
+[ $# -gt 0 ] && shift
+want_engine=0 want_dotfiles=0 engine_path="" dotfiles_path=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --engine)
+      want_engine=1
+      case "${2:-}" in "" | -*) ;; *) engine_path="$2"; shift ;; esac
+      ;;
+    --dotfiles)
+      want_dotfiles=1
+      case "${2:-}" in "" | -*) ;; *) dotfiles_path="$2"; shift ;; esac
+      ;;
+    -n | --dry-run) MACOS_DRY_RUN=1 ;;
+    *) die "unknown option: $1 (see 'macos dev --help')" ;;
+  esac
+  shift
+done
+export MACOS_DRY_RUN
+
+abspath() { (cd "$1" 2>/dev/null && pwd -P); }
+installed_dotfiles() { printf '%s\n' "${MACOS_DOTFILES_INSTALLED:-$MACOS_DOTFILES}"; }
+
+# active_engine — the engine the `macos` command on PATH runs.
+active_engine() {
+  local target
+  target="$(readlink -f "$MACOS_CLI_LINK" 2>/dev/null)" || true
+  if [ -n "$target" ]; then
+    dirname "$(dirname "$target")"
+  fi
+}
+
+# git_summary <dir> — branch, sync with its upstream, and local edits.
+git_summary() {
+  local b ahead behind dirty=""
+  [ -d "$1/.git" ] || { echo "not a git clone"; return; }
+  b="$(git -C "$1" rev-parse --abbrev-ref HEAD 2>/dev/null)"
+  ahead="$(git -C "$1" rev-list --count '@{u}..HEAD' 2>/dev/null || echo "?")"
+  behind="$(git -C "$1" rev-list --count 'HEAD..@{u}' 2>/dev/null || echo "?")"
+  [ -n "$(git -C "$1" status --porcelain 2>/dev/null)" ] && dirty=", uncommitted changes"
+  printf '%s, %s ahead / %s behind origin%s\n' "$b" "$ahead" "$behind" "$dirty"
+}
+
+valid_engine() { [ -x "$1/bin/macos" ] && [ -f "$1/lib/engine.sh" ]; }
+valid_dotfiles() { [ -d "$1/macos/profiles/base" ]; }
+
+dev_status() {
+  local ae id
+  ae="$(active_engine)"
+  id="$(installed_dotfiles)"
+  printf 'Engine\n'
+  printf '  installed  %s  (%s)\n' "$MACOS_INSTALL_DIR" "$(git_summary "$MACOS_INSTALL_DIR")"
+  if [ -n "${MACOS_DEV_ENGINE:-}" ]; then
+    printf '  dev clone  %s  (%s)\n' "$MACOS_DEV_ENGINE" "$(git_summary "$MACOS_DEV_ENGINE")"
+  fi
+  if [ -z "$ae" ]; then
+    printf '  active     none: `macos` is not linked into ~/.local/bin (run macos update)\n'
+  elif [ "$(abspath "$ae")" = "$(abspath "$MACOS_INSTALL_DIR")" ]; then
+    printf '  active     installed\n'
+  else
+    printf '  active     DEV: %s   (macos dev unlink --engine)\n' "$ae"
+  fi
+  printf '\nDotfiles\n'
+  printf '  installed  %s  (%s)\n' "$id" "$(git_summary "$id")"
+  if [ -n "${MACOS_DEV_DOTFILES:-}" ]; then
+    printf '  dev clone  %s  (%s)\n' "$MACOS_DEV_DOTFILES" "$(git_summary "$MACOS_DEV_DOTFILES")"
+  fi
+  if dotfiles_is_dev; then
+    printf '  linked     DEV: %s   (macos dev unlink --dotfiles)\n' "$MACOS_DOTFILES"
+  else
+    printf '  linked     installed\n'
+  fi
+}
+
+# relink_dotfiles <from> <to> — move the Stow links from one clone to another.
+relink_dotfiles() {
+  local from="$1" to="$2"
+  if [ "$(abspath "$from")" = "$(abspath "$to")" ]; then
+    skip "dotfiles already linked from $to"
+    return 0
+  fi
+  MACOS_DOTFILES="$from"
+  if valid_dotfiles "$from"; then
+    dotfiles_unlink
+  fi
+  MACOS_DOTFILES="$to"
+  export MACOS_DOTFILES
+  dotfiles_link
+}
+
+dev_link() {
+  if [ "$want_engine$want_dotfiles" = 00 ]; then
+    [ -n "${MACOS_DEV_ENGINE:-}${MACOS_DEV_DOTFILES:-}" ] ||
+      die "no dev clones known yet: macos dev link --engine <path> --dotfiles <path>"
+    [ -n "${MACOS_DEV_ENGINE:-}" ] && want_engine=1
+    [ -n "${MACOS_DEV_DOTFILES:-}" ] && want_dotfiles=1
+  fi
+  lock_acquire
+  dry_run && say "Dry run: nothing will be changed."
+  if [ "$want_engine" = 1 ]; then
+    step "Engine"
+    engine_path="$(abspath "${engine_path:-${MACOS_DEV_ENGINE:-}}")" || die "no such engine clone: ${engine_path:-${MACOS_DEV_ENGINE:-}}"
+    valid_engine "$engine_path" || die "$engine_path is not an engine clone (no bin/macos, lib/engine.sh)"
+    run ln -sfn "$engine_path/bin/macos" "$MACOS_CLI_LINK"
+    machine_env_set MACOS_DEV_ENGINE "$engine_path"
+    ok "\`macos\` now runs $engine_path"
+  fi
+  if [ "$want_dotfiles" = 1 ]; then
+    step "Dotfiles"
+    dotfiles_path="$(abspath "${dotfiles_path:-${MACOS_DEV_DOTFILES:-}}")" || die "no such dotfiles clone: ${dotfiles_path:-${MACOS_DEV_DOTFILES:-}}"
+    valid_dotfiles "$dotfiles_path" || die "$dotfiles_path is not a dotfiles clone (no macos/profiles/base)"
+    command -v stow >/dev/null 2>&1 || die "GNU Stow is not installed"
+    [ -n "${MACOS_DOTFILES_INSTALLED:-}" ] || machine_env_set MACOS_DOTFILES_INSTALLED "$(abspath "$MACOS_DOTFILES")"
+    machine_env_set MACOS_DEV_DOTFILES "$dotfiles_path"
+    relink_dotfiles "$MACOS_DOTFILES" "$dotfiles_path"
+    machine_env_set MACOS_DOTFILES "$dotfiles_path"
+    ok "dotfiles now linked from $dotfiles_path (edits there are live)"
+  fi
+}
+
+dev_unlink() {
+  local id
+  if [ "$want_engine$want_dotfiles" = 00 ]; then
+    want_engine=1 want_dotfiles=1
+  fi
+  lock_acquire
+  dry_run && say "Dry run: nothing will be changed."
+  if [ "$want_engine" = 1 ]; then
+    step "Engine"
+    valid_engine "$MACOS_INSTALL_DIR" || die "no installed engine at $MACOS_INSTALL_DIR (run boot.sh)"
+    if [ "$(abspath "$(active_engine)")" = "$(abspath "$MACOS_INSTALL_DIR")" ]; then
+      skip "\`macos\` already runs the installed engine"
+    else
+      run ln -sfn "$MACOS_INSTALL_DIR/bin/macos" "$MACOS_CLI_LINK"
+      ok "\`macos\` runs the installed engine again ($MACOS_INSTALL_DIR)"
+      if [ -n "${MACOS_DEV_ENGINE:-}" ] && [ "$(git -C "$MACOS_DEV_ENGINE" rev-list --count '@{u}..HEAD' 2>/dev/null || echo 0)" != 0 ]; then
+        warn "your dev engine has unpushed commits; push them, then 'macos update' installs them"
+      fi
+    fi
+  fi
+  if [ "$want_dotfiles" = 1 ]; then
+    step "Dotfiles"
+    id="$(installed_dotfiles)"
+    if ! dotfiles_is_dev; then
+      skip "dotfiles already linked from the installed clone ($id)"
+    else
+      valid_dotfiles "$id" || die "the installed dotfiles clone $id is missing"
+      if [ -n "$(git -C "$MACOS_DOTFILES" status --porcelain 2>/dev/null)" ] ||
+        [ "$(git -C "$MACOS_DOTFILES" rev-list --count '@{u}..HEAD' 2>/dev/null || echo 0)" != 0 ]; then
+        warn "your dev dotfiles have changes not on GitHub yet; they won't be in $id until you push and run 'macos update'"
+      fi
+      relink_dotfiles "$MACOS_DOTFILES" "$id"
+      machine_env_set MACOS_DOTFILES "$id"
+      ok "dotfiles linked from the installed clone again ($id); run 'macos update' to pull what you pushed"
+    fi
+  fi
+}
+
+case "$action" in
+  status) dev_status ;;
+  link) dev_link ;;
+  unlink) dev_unlink ;;
+  *) die "unknown action '$action' (status, link or unlink)" ;;
+esac

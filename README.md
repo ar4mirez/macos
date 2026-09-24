@@ -75,6 +75,7 @@ macos brave       list | add | remove | adopt extensions for every Brave profile
 macos doctor      Report what is actually true, plus pending manual steps
 macos update      Pull engine + dotfiles, run migrations, apply
 macos uninstall   Unlink dotfiles, remove the engine (apps are left alone)
+macos dev         status | link | unlink: run your development clones on this Mac
 ```
 
 Every command that changes something supports `--dry-run`, takes a lock so two runs never overlap, and logs to `~/.local/state/macos/logs/`.
@@ -204,8 +205,10 @@ macos uninstall   # unlink dotfiles, restore the files they replaced, remove the
 
 ## Development
 
+Develop in your own clone, not in the installed `~/.local/share/macos`. `make check` runs the suite, `make dev` makes `macos` run your clone, and `macos update` installs what you push. See [docs/development.md](docs/development.md) and [AGENTS.md](AGENTS.md).
+
 ```sh
-./test/run.sh
+make check        # = ./test/run.sh
 ```
 
 - The tests run under `/bin/bash` 3.2.

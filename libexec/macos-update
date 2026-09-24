@@ -39,36 +39,50 @@ incoming() {
   git -C "$dir" log --oneline 'HEAD..@{u}' 2>/dev/null || true
 }
 
+# update always updates the INSTALLED copies; development clones linked
+# with `macos dev link` belong to you and are never pulled into.
 step "Engine"
-new="$(incoming "$MACOS_ROOT" -c credential.helper=)"
-if [ -z "$new" ]; then
-  skip "engine up to date ($(cat "$MACOS_ROOT/version"))"
+ENGINE="$MACOS_INSTALL_DIR"
+if engine_is_dev; then
+  skip "running your dev engine ($MACOS_ROOT): commit and pull it yourself; updating the installed one"
+fi
+if [ ! -d "$ENGINE/.git" ]; then
+  warn "no installed engine clone at $ENGINE; skipping"
 else
-  printf '%s\n' "$new" | sed 's/^/    /' >&2
-  run git -c credential.helper= -C "$MACOS_ROOT" merge --ff-only --quiet '@{u}' ||
-    die "the engine at $MACOS_ROOT has local changes or diverged; it is not meant to be edited there"
-  ok "engine updated to $(cat "$MACOS_ROOT/version")"
+  new="$(incoming "$ENGINE" -c credential.helper=)"
+  if [ -z "$new" ]; then
+    skip "engine up to date ($(cat "$ENGINE/version"))"
+  else
+    printf '%s\n' "$new" | sed 's/^/    /' >&2
+    run git -c credential.helper= -C "$ENGINE" merge --ff-only --quiet '@{u}' ||
+      die "the engine at $ENGINE has local changes or diverged; it is not meant to be edited there (use a dev clone and 'macos dev link')"
+    ok "engine updated to $(cat "$ENGINE/version")"
+  fi
 fi
 
 step "Dotfiles"
-new="$(incoming "$MACOS_DOTFILES" "${GIT_GH_ONLY[@]}")"
+DOTFILES="${MACOS_DOTFILES_INSTALLED:-$MACOS_DOTFILES}"
+if dotfiles_is_dev; then
+  skip "dotfiles are linked from your dev clone ($MACOS_DOTFILES): pull it yourself; updating the installed one"
+fi
+new="$(incoming "$DOTFILES" "${GIT_GH_ONLY[@]}")"
 if [ -z "$new" ]; then
   skip "dotfiles up to date"
 else
   printf '%s\n' "$new" | sed 's/^/    /' >&2
-  if ! run git "${GIT_GH_ONLY[@]}" -C "$MACOS_DOTFILES" rebase --autostash --quiet '@{u}'; then
-    git -C "$MACOS_DOTFILES" rebase --abort >/dev/null 2>&1 || true
-    die "your local dotfiles commits conflict with the remote; resolve in $MACOS_DOTFILES (nothing was applied)"
+  if ! run git "${GIT_GH_ONLY[@]}" -C "$DOTFILES" rebase --autostash --quiet '@{u}'; then
+    git -C "$DOTFILES" rebase --abort >/dev/null 2>&1 || true
+    die "your local dotfiles commits conflict with the remote; resolve in $DOTFILES (nothing was applied)"
   fi
   # When re-applying the autostash conflicts, git still exits 0 and leaves
   # conflict markers in live (symlinked) dotfiles. The edits are safe in the
   # stash, so put the files back to the pulled version and stop.
-  if ! dry_run && [ -n "$(git -C "$MACOS_DOTFILES" ls-files -u)" ]; then
-    if [ -n "$(git -C "$MACOS_DOTFILES" stash list)" ]; then
-      git -C "$MACOS_DOTFILES" reset --hard --quiet HEAD
-      die "your uncommitted dotfiles edits conflict with what was pulled. They are saved in the stash; the files are back to the pulled version so your shell keeps working. Resolve with: git -C $MACOS_DOTFILES stash pop (fix conflicts, commit), then 'macos apply'. Nothing was applied."
+  if ! dry_run && [ -n "$(git -C "$DOTFILES" ls-files -u)" ]; then
+    if [ -n "$(git -C "$DOTFILES" stash list)" ]; then
+      git -C "$DOTFILES" reset --hard --quiet HEAD
+      die "your uncommitted dotfiles edits conflict with what was pulled. They are saved in the stash; the files are back to the pulled version so your shell keeps working. Resolve with: git -C $DOTFILES stash pop (fix conflicts, commit), then 'macos apply'. Nothing was applied."
     fi
-    die "unresolved conflicts in $MACOS_DOTFILES; resolve them, then 'macos update' (nothing was applied)"
+    die "unresolved conflicts in $DOTFILES; resolve them, then 'macos update' (nothing was applied)"
   fi
   ok "dotfiles updated"
 fi

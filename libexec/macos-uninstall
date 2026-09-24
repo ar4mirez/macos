@@ -28,6 +28,9 @@ while [ $# -gt 0 ]; do
 done
 export MACOS_DRY_RUN MACOS_YES
 
+if engine_is_dev || dotfiles_is_dev; then
+  die "dev mode is on; run 'macos dev unlink' first (uninstall removes the installed engine, never your clones)"
+fi
 engine_removable || die "$MACOS_ROOT does not look like an engine clone; refusing to remove it"
 lock_acquire
 dry_run && say "Dry run: nothing will be changed."

@@ -48,6 +48,9 @@ export MANAGED_PREFS_DIR="$SANDBOX/managed"
 export MACOS_MIGRATIONS_DIR="$SANDBOX/migrations"
 ln -s "$ROOT/test/stubs/stub" "$SANDBOX/bin/tailscale-cli"
 export TAILSCALE_CLI="$SANDBOX/bin/tailscale-cli"
+# The engine under test is the "installed" one unless a test says otherwise
+# (dev-mode tests point MACOS_INSTALL_DIR at a separate copy).
+export MACOS_INSTALL_DIR="$ROOT"
 export PAM_SUDO_LOCAL="$SANDBOX/etc/sudo_local"
 # Sandboxed like the other system paths: the real one exists once a Mac has
 # run `macos apply`, and must never influence (or be touched by) a test.
@@ -1590,7 +1593,7 @@ t_uninstall() {
   echo secret >"$MACOS_STATE/backup/20260101-000000-retired-key/.ssh/id_ed25519"
   mkdir -p "$HOME/.config/git/identity.d" "$HOME/.ssh/config.d"
   touch "$HOME/.config/git/identity.gitconfig" "$HOME/.config/git/identity.d/x.gitconfig" "$HOME/.ssh/config.d/macos-identity" "$HOME/.ssh/macos-default.pub"
-  STUB_GH_CONFIG_GET_OUT=ssh "$copy/bin/macos" uninstall --yes >"$SANDBOX/o" 2>&1 || { cat "$SANDBOX/o"; return 1; }
+  STUB_GH_CONFIG_GET_OUT=ssh MACOS_INSTALL_DIR="$copy" "$copy/bin/macos" uninstall --yes >"$SANDBOX/o" 2>&1 || { cat "$SANDBOX/o"; return 1; }
   [ ! -e "$HOME/sudo_local" ] && grep -q '^gh config set git_protocol https' "$STUB_LOG" &&
   [ ! -e "$copy" ] && [ ! -L "$HOME/.local/bin/macos" ] && [ -f "$MACOS_DOTFILES/zsh/.zshrc" ] &&
     [ ! -L "$HOME/.zshrc" ] && [ "$(cat "$HOME/.zshrc")" = original ] &&
@@ -1604,7 +1607,7 @@ t_uninstall_guard() {
   dotfiles_env
   local copy="$SANDBOX/not-an-engine"
   rm -rf "$copy" && cp -R "$ROOT" "$copy" && rm -rf "$copy/.git"
-  "$copy/bin/macos" uninstall --yes >"$SANDBOX/o" 2>&1 && return 1
+  MACOS_INSTALL_DIR="$copy" "$copy/bin/macos" uninstall --yes >"$SANDBOX/o" 2>&1 && return 1
   [ -d "$copy" ] && grep -q 'does not look like an engine clone' "$SANDBOX/o"
 }
 check "uninstall refuses to delete a directory that is not an engine clone" t_uninstall_guard
@@ -1613,7 +1616,7 @@ t_uninstall_dry_run() {
   dotfiles_env
   local copy="$SANDBOX/engine-copy2"
   rm -rf "$copy" && cp -R "$ROOT" "$copy" && copy="$(cd "$copy" && pwd -P)"
-  "$copy/bin/macos" uninstall --dry-run >"$SANDBOX/o" 2>&1 || { cat "$SANDBOX/o"; return 1; }
+  MACOS_INSTALL_DIR="$copy" "$copy/bin/macos" uninstall --dry-run >"$SANDBOX/o" 2>&1 || { cat "$SANDBOX/o"; return 1; }
   [ -d "$copy" ] && grep -q "would run: rm -rf $copy" "$SANDBOX/o"
 }
 check "uninstall --dry-run removes nothing" t_uninstall_dry_run
@@ -1834,6 +1837,78 @@ t_brave_adopt() {
     [ "$(grep -c "$EXT1" "$MACOS_DOTFILES/macos/profiles/base/brave-extensions.conf" "$W2" | awk -F: '{s+=$2} END {print s}')" -eq 1 ] || { cat "$W2" "$SANDBOX/o"; return 1; }
 }
 check "brave adopt declares extensions installed by hand (store installs only, names from manifests)" t_brave_adopt
+
+# ---------------------------------------------------------------------------
+section "dev mode"
+
+# Two engine copies: "installed" (A) and a dev clone (B) that reports 9.9.9-dev.
+dev_engines() {
+  local a="$SANDBOX/installed-engine" b="$SANDBOX/dev-engine"
+  rm -rf "$a" "$b"
+  cp -R "$ROOT" "$a" && cp -R "$ROOT" "$b"
+  echo 9.9.9-dev >"$b/version"
+  ENG_A="$(cd "$a" && pwd -P)" ENG_B="$(cd "$b" && pwd -P)"
+  mkdir -p "$HOME/.local/bin" && ln -sfn "$ENG_A/bin/macos" "$HOME/.local/bin/macos"
+}
+
+t_dev_link_engine() {
+  dotfiles_env; dev_engines
+  MACOS_INSTALL_DIR="$ENG_A" "$HOME/.local/bin/macos" dev link --engine "$ENG_B" >"$SANDBOX/o" 2>&1 || { cat "$SANDBOX/o"; return 1; }
+  [ "$(MACOS_INSTALL_DIR="$ENG_A" "$HOME/.local/bin/macos" --version)" = 9.9.9-dev ] &&
+    grep -qx "MACOS_DEV_ENGINE=\"$ENG_B\"" "$MACOS_STATE/machine.env" || { cat "$SANDBOX/o"; return 1; }
+  MACOS_INSTALL_DIR="$ENG_A" "$HOME/.local/bin/macos" dev status >"$SANDBOX/s" 2>&1
+  grep -q "active     DEV: $ENG_B" "$SANDBOX/s" || { cat "$SANDBOX/s"; return 1; }
+  MACOS_INSTALL_DIR="$ENG_A" "$HOME/.local/bin/macos" dev unlink --engine >"$SANDBOX/o" 2>&1 || { cat "$SANDBOX/o"; return 1; }
+  [ "$(MACOS_INSTALL_DIR="$ENG_A" "$HOME/.local/bin/macos" --version)" = "$(cat "$ENG_A/version")" ] &&
+    [ "$(readlink "$HOME/.local/bin/macos")" = "$ENG_A/bin/macos" ]
+}
+check "dev link/unlink --engine switches the \`macos\` command between clone and installed" t_dev_link_engine
+
+dev_dotfiles() {
+  dotfiles_env
+  "$M" dotfiles link >/dev/null 2>&1
+  DOT_DEV="$SANDBOX/dev-dotfiles"
+  rm -rf "$DOT_DEV" && cp -R "$MACOS_DOTFILES" "$DOT_DEV" && DOT_DEV="$(cd "$DOT_DEV" && pwd -P)"
+  printf 'dev zshrc\n' >"$DOT_DEV/zsh/.zshrc"
+}
+
+t_dev_link_dotfiles() {
+  dev_dotfiles
+  local inst; inst="$(cd "$MACOS_DOTFILES" && pwd -P)"
+  "$M" dev link --dotfiles "$DOT_DEV" >"$SANDBOX/o" 2>&1 || { cat "$SANDBOX/o"; return 1; }
+  [ "$(cat "$HOME/.zshrc")" = "dev zshrc" ] && grep -qx "MACOS_DOTFILES=\"$DOT_DEV\"" "$MACOS_STATE/machine.env" &&
+    grep -qx "MACOS_DOTFILES_INSTALLED=\"$inst\"" "$MACOS_STATE/machine.env" || { cat "$SANDBOX/o" "$MACOS_STATE/machine.env"; return 1; }
+  # Real users do not export MACOS_DOTFILES; machine.env decides from now on.
+  env -u MACOS_DOTFILES "$M" dev status >"$SANDBOX/s" 2>&1
+  grep -q "linked     DEV: $DOT_DEV" "$SANDBOX/s" || { cat "$SANDBOX/s"; return 1; }
+  env -u MACOS_DOTFILES "$M" dev unlink --dotfiles >"$SANDBOX/o" 2>&1 || { cat "$SANDBOX/o"; return 1; }
+  [ "$(cat "$HOME/.zshrc")" = zshrc ] && grep -qx "MACOS_DOTFILES=\"$inst\"" "$MACOS_STATE/machine.env"
+}
+check "dev link/unlink --dotfiles moves the live links to the clone and back" t_dev_link_dotfiles
+
+t_dev_update_leaves_clones_alone() {
+  dev_dotfiles
+  "$M" dev link --dotfiles "$DOT_DEV" >/dev/null 2>&1; : >"$STUB_LOG"
+  local inst; inst="$(sed -n 's/^MACOS_DOTFILES_INSTALLED="\(.*\)"$/\1/p' "$MACOS_STATE/machine.env")"
+  STUB_GIT_OUT="abc1234 incoming" env -u MACOS_DOTFILES "$M" update --yes >"$SANDBOX/o" 2>&1
+  grep -q "pull it yourself; updating the installed one" "$SANDBOX/o" &&
+    grep -q "^git .* -C $inst fetch" "$STUB_LOG" && ! grep -q -- "-C $DOT_DEV " "$STUB_LOG" || { cat "$SANDBOX/o" "$STUB_LOG"; return 1; }
+}
+check "update never pulls into a linked dev clone; it updates the installed copy" t_dev_update_leaves_clones_alone
+
+t_dev_uninstall_refuses() {
+  dotfiles_env; dev_engines
+  MACOS_INSTALL_DIR="$ENG_A" "$ENG_B/bin/macos" uninstall --yes >"$SANDBOX/o" 2>&1 && return 1
+  grep -q "dev mode is on; run 'macos dev unlink' first" "$SANDBOX/o" && [ -d "$ENG_B" ] && [ -d "$ENG_A" ]
+}
+check "uninstall refuses in dev mode (it never deletes your clone)" t_dev_uninstall_refuses
+
+t_dev_doctor_reminds() {
+  doctor_env; dev_engines
+  ( MACOS_INSTALL_DIR="$ENG_A" "$ENG_B/bin/macos" doctor >"$SANDBOX/o" 2>&1 )
+  grep -q "warn  dev mode: \`macos\` runs your clone at $ENG_B" "$SANDBOX/o" || { cat "$SANDBOX/o"; return 1; }
+}
+check "doctor reminds you while dev mode is on" t_dev_doctor_reminds
 
 # ---------------------------------------------------------------------------
 section "review 2 regressions"

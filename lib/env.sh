@@ -27,9 +27,12 @@ if [ -f "$MACOS_MACHINE_ENV" ]; then
 fi
 
 : "${MACOS_DOTFILES:=$HOME/.dotfiles}"
+# Where boot.sh installs the engine. `macos dev link` can point the `macos`
+# command at a development clone instead; this stays the installed copy.
+: "${MACOS_INSTALL_DIR:=$HOME/.local/share/macos}"
 : "${MACOS_PROFILE:=}"
 
-export MACOS_STATE MACOS_MACHINE_ENV MACOS_DOTFILES MACOS_PROFILE
+export MACOS_STATE MACOS_MACHINE_ENV MACOS_DOTFILES MACOS_PROFILE MACOS_INSTALL_DIR
 
 # machine_env_set <KEY> <value> — persist a MACOS_* setting for this machine,
 # keeping the other keys. Needs lib/run.sh (dry-run) at call time.

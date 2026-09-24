@@ -87,3 +87,18 @@ engine_removable() {
   [ -d "$MACOS_ROOT/.git" ] && [ -x "$MACOS_ROOT/bin/macos" ] && [ -f "$MACOS_ROOT/lib/engine.sh" ] &&
     case "$MACOS_ROOT" in "$HOME" | "$HOME/" | / | "") return 1 ;; esac
 }
+
+# --- development clones -------------------------------------------------------
+
+# engine_is_dev — this process runs from a development clone, not the
+# installed engine.
+engine_is_dev() {
+  [ "$(cd "$MACOS_ROOT" 2>/dev/null && pwd -P)" != "$(cd "$MACOS_INSTALL_DIR" 2>/dev/null && pwd -P)" ]
+}
+
+# dotfiles_is_dev — the linked dotfiles are a development clone (set by
+# `macos dev link --dotfiles`).
+dotfiles_is_dev() {
+  [ -n "${MACOS_DOTFILES_INSTALLED:-}" ] &&
+    [ "$(cd "$MACOS_DOTFILES" 2>/dev/null && pwd -P)" != "$(cd "$MACOS_DOTFILES_INSTALLED" 2>/dev/null && pwd -P)" ]
+}
