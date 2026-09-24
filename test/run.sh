@@ -12,7 +12,7 @@ ROOT="$(cd -- "$(dirname -- "$0")/.." && pwd -P)"
 SANDBOX="$(mktemp -d "${TMPDIR:-/tmp}/macos-test.XXXXXX")"
 trap 'rm -rf "$SANDBOX"' EXIT
 
-STUBBED_TOOLS="defaults killall osascript scutil sudo brew mas dockutil duti softwareupdate hidutil pmset gh op git curl xcode-select uname mise"
+STUBBED_TOOLS="defaults killall osascript scutil sudo brew mas dockutil duti softwareupdate hidutil pmset gh op git curl xcode-select uname mise open"
 
 REAL_HOME="$HOME"
 export HOME="$SANDBOX/home"
@@ -33,6 +33,10 @@ done
 export SOCKETFILTERFW="$SANDBOX/bin/socketfilterfw"
 export ACTIVATE_SETTINGS="$SANDBOX/bin/activateSettings"
 export OP_SSH_SIGN="$SANDBOX/bin/op-ssh-sign"
+# `defaults` gets a stateful double so idempotency and read-back are testable.
+ln -sf "$ROOT/test/stubs/defaults" "$SANDBOX/bin/defaults"
+export STUB_DEFAULTS_DB="$SANDBOX/defaults.db"
+export MANAGED_PREFS_DIR="$SANDBOX/managed"
 export PAM_SUDO_LOCAL="$SANDBOX/etc/sudo_local"
 export HOMEBREW_PREFIX="$SANDBOX/homebrew"
 export MACOS_SUDO_REFRESH=1
@@ -198,7 +202,7 @@ check "bootstrap is dispatched under bash 3.2" t_bootstrap_runs_on_bash32
 t_bash4_override() {
   [ -n "$BASH4" ] || { echo "no bash 4 available"; return 0; }
   local rc=0
-  MACOS_BASH="$BASH4" "$M" defaults >"$SANDBOX/o" 2>&1 || rc=$?
+  MACOS_BASH="$BASH4" "$M" identity >"$SANDBOX/o" 2>&1 || rc=$?
   [ "$rc" -eq 2 ] && grep -q 'not implemented' "$SANDBOX/o"
 }
 check "bash-4 subcommands run under MACOS_BASH" t_bash4_override
@@ -878,6 +882,194 @@ t_apply_links_and_installs_runtimes() {
     ! grep -rq SECRETTOKEN "$SANDBOX/o" "$STUB_LOG" "$MACOS_STATE/logs"
 }
 check "apply links dotfiles and installs mise runtimes without leaking the token" t_apply_links_and_installs_runtimes
+
+# ---------------------------------------------------------------------------
+section "defaults"
+
+defaults_env() {
+  phase3_env
+  rm -f "$STUB_DEFAULTS_DB" && : >"$STUB_DEFAULTS_DB"
+  rm -rf "$HOME" "$MANAGED_PREFS_DIR" && mkdir -p "$HOME"
+  cat >"$MACOS_DOTFILES/macos/profiles/base/defaults.conf" <<'CONF'
+# comment
+-g                                | KeyRepeat                   | int    | 2
+com.apple.dock                    | autohide                    | bool   | true
+com.apple.dock                    | autohide-delay              | float  | 0
+com.apple.screencapture           | location                    | string | ~/Screenshots
+@currentHost:-g                   | com.apple.mouse.tapBehavior | int    | 1
+com.apple.AppleMultitouchTrackpad | Clicking                    | int    | 1
+CONF
+  printf 'com.apple.dock | autohide | bool | no\n' >"$MACOS_DOTFILES/macos/profiles/work/defaults.conf"
+}
+
+t_defaults_apply() {
+  defaults_env
+  "$M" defaults apply >"$SANDBOX/o" 2>&1 || { cat "$SANDBOX/o"; return 1; }
+  local L="$STUB_LOG"
+  grep -q '^defaults write -g KeyRepeat -int 2$' "$L" &&
+    grep -q '^defaults write com.apple.dock autohide -bool false$' "$L" &&
+    ! grep -q 'autohide -bool true' "$L" &&
+    grep -q '^defaults write com.apple.dock autohide-delay -float 0$' "$L" &&
+    grep -q "^defaults write com.apple.screencapture location -string $HOME/Screenshots\$" "$L" && [ -d "$HOME/Screenshots" ] &&
+    grep -q '^defaults -currentHost write -g com.apple.mouse.tapBehavior -int 1$' "$L" &&
+    grep -q '^killall Dock' "$L" && grep -q '^killall SystemUIServer' "$L" && grep -q '^activateSettings -u' "$L" ||
+    { cat "$L"; return 1; }
+}
+check "defaults apply writes typed values; profile overrides base; restarts what changed" t_defaults_apply
+
+t_defaults_idempotent() {
+  defaults_env
+  "$M" defaults apply >/dev/null 2>&1; : >"$STUB_LOG"
+  "$M" defaults apply >"$SANDBOX/o" 2>&1 || { cat "$SANDBOX/o"; return 1; }
+  ! grep -q 'defaults.* write' "$STUB_LOG" && ! grep -q '^killall' "$STUB_LOG" && grep -q 'already set' "$SANDBOX/o"
+}
+check "defaults apply twice writes nothing the second time" t_defaults_idempotent
+
+t_defaults_check() {
+  defaults_env
+  "$M" defaults check >"$SANDBOX/o" 2>&1 && return 1
+  grep -q 'drift  -g KeyRepeat: (unset) → 2' "$SANDBOX/o" && ! grep -q 'defaults.* write' "$STUB_LOG" || { cat "$SANDBOX/o"; return 1; }
+  "$M" defaults apply >/dev/null 2>&1
+  "$M" defaults check >"$SANDBOX/o" 2>&1 || { cat "$SANDBOX/o"; return 1; }
+  grep -q 'no drift' "$SANDBOX/o"
+}
+check "defaults check reports drift without writing, then passes after apply" t_defaults_check
+
+t_defaults_type_drift() {
+  defaults_env
+  "$M" defaults apply >/dev/null 2>&1
+  # Same value, wrong type: stored as a boolean, declared as an int.
+  defaults write com.apple.AppleMultitouchTrackpad Clicking -bool true
+  "$M" defaults check >"$SANDBOX/o" 2>&1 && return 1
+  grep -q 'Clicking: 1 (boolean) → 1' "$SANDBOX/o" || { cat "$SANDBOX/o"; return 1; }
+  : >"$STUB_LOG"; "$M" defaults apply >/dev/null 2>&1
+  grep -q '^defaults write com.apple.AppleMultitouchTrackpad Clicking -int 1$' "$STUB_LOG"
+}
+check "a value stored with the wrong type counts as drift and is rewritten" t_defaults_type_drift
+
+t_defaults_float_normalized() {
+  defaults_env
+  "$M" defaults apply >/dev/null 2>&1
+  printf 'global|com.apple.dock|autohide-delay|float|0.000\n' >>"$STUB_DEFAULTS_DB"
+  "$M" defaults check >"$SANDBOX/o" 2>&1; ! grep -q autohide-delay "$SANDBOX/o"
+}
+check "float values compare numerically (0 == 0.000)" t_defaults_float_normalized
+
+t_defaults_not_taken() {
+  defaults_env
+  STUB_DEFAULTS_IGNORE_WRITES=1 "$M" defaults apply >"$SANDBOX/o" 2>&1 || { cat "$SANDBOX/o"; return 1; }
+  grep -q 'KeyRepeat did not take' "$SANDBOX/o"
+}
+check "a write that does not read back is reported" t_defaults_not_taken
+
+t_defaults_dry_run() {
+  defaults_env
+  "$M" defaults apply --dry-run >"$SANDBOX/o" 2>&1 || { cat "$SANDBOX/o"; return 1; }
+  ! grep -q 'defaults.* write' "$STUB_LOG" && [ ! -d "$HOME/Screenshots" ] && ! grep -q '^killall' "$STUB_LOG" &&
+    grep -q 'would run: defaults write -g KeyRepeat -int 2' "$SANDBOX/o"
+}
+check "defaults apply --dry-run writes nothing" t_defaults_dry_run
+
+t_defaults_invalid_line() {
+  defaults_env
+  printf 'com.apple.dock | orphan\n' >>"$MACOS_DOTFILES/macos/profiles/base/defaults.conf"
+  "$M" defaults apply >"$SANDBOX/o" 2>&1 && return 1
+  grep -q 'expected domain | key | type | value' "$SANDBOX/o"
+}
+check "a malformed defaults.conf line stops the run" t_defaults_invalid_line
+
+# ---------------------------------------------------------------------------
+section "system settings"
+
+system_env() {
+  defaults_env
+  rm -f "$MACOS_DOTFILES/macos/profiles/"*/defaults.conf
+  rm -rf "$SANDBOX/Applications" && mkdir -p "$SANDBOX/Applications/A.app" "$SANDBOX/Applications/My App.app"
+  printf '%s\n' "$SANDBOX/Applications/A.app" "$SANDBOX/Applications/My App.app" "$SANDBOX/Applications/Missing.app" \
+    >"$MACOS_DOTFILES/macos/profiles/base/dock.conf"
+  printf 'capslock = none\nbrowser = none\n' >"$MACOS_DOTFILES/macos/profiles/base/system.conf"
+}
+TAB="$(printf '\t')"
+
+t_dock_apply() {
+  system_env
+  STUB_DOCKUTIL___LIST_OUT="Safari${TAB}file:///Applications/Safari.app/${TAB}persistentApps${TAB}/p${TAB}com.apple.Safari
+Downloads${TAB}file:///Users/x/Downloads/${TAB}persistentOthers${TAB}/p${TAB}" \
+    "$M" defaults apply >"$SANDBOX/o" 2>&1 || { cat "$SANDBOX/o"; return 1; }
+  grep -q '^dockutil --remove com.apple.Safari --no-restart' "$STUB_LOG" && ! grep -q 'remove Downloads' "$STUB_LOG" &&
+    grep -q "^dockutil --add $SANDBOX/Applications/A.app --no-restart" "$STUB_LOG" &&
+    grep -q "^dockutil --add $SANDBOX/Applications/My App.app --no-restart" "$STUB_LOG" &&
+    ! grep -q 'Missing.app --no-restart' "$STUB_LOG" && grep -q 'Missing.app is not installed' "$SANDBOX/o" &&
+    grep -q '^killall Dock' "$STUB_LOG" || { cat "$STUB_LOG"; return 1; }
+}
+check "Dock: replaces only the app section, in dock.conf order, skipping missing apps" t_dock_apply
+
+t_dock_idempotent() {
+  system_env
+  STUB_DOCKUTIL___LIST_OUT="A${TAB}file://$SANDBOX/Applications/A.app/${TAB}persistentApps${TAB}/p${TAB}com.a
+My App${TAB}file://$SANDBOX/Applications/My%20App.app/${TAB}persistentApps${TAB}/p${TAB}com.myapp" \
+    "$M" defaults apply >"$SANDBOX/o" 2>&1 || { cat "$SANDBOX/o"; return 1; }
+  ! grep -qE '^dockutil --(add|remove)' "$STUB_LOG" && grep -q 'Dock already matches' "$SANDBOX/o"
+}
+check "Dock: no changes when it already matches (URL-decoded paths)" t_dock_idempotent
+
+t_capslock() {
+  system_env
+  printf 'capslock = escape\n' >"$MACOS_DOTFILES/macos/profiles/work/system.conf"
+  "$M" defaults apply >"$SANDBOX/o" 2>&1 || { cat "$SANDBOX/o"; return 1; }
+  local agent="$HOME/Library/LaunchAgents/com.ar4mirez.macos.capslock.plist"
+  plutil -lint "$agent" >/dev/null && grep -q '0x700000029' "$agent" &&
+    grep -q 'hidutil property --set {"UserKeyMapping":\[{"HIDKeyboardModifierMappingSrc":0x700000039,"HIDKeyboardModifierMappingDst":0x700000029}\]}' "$STUB_LOG" ||
+    { cat "$STUB_LOG"; return 1; }
+  : >"$STUB_LOG"
+  STUB_HIDUTIL_OUT="HIDKeyboardModifierMappingDst = 30064771113" "$M" defaults apply >"$SANDBOX/o" 2>&1
+  ! grep -q 'hidutil property --set' "$STUB_LOG" || return 1
+  printf 'capslock = none\n' >"$MACOS_DOTFILES/macos/profiles/work/system.conf"
+  "$M" defaults apply >/dev/null 2>&1
+  [ ! -f "$agent" ] && grep -q 'hidutil property --set {"UserKeyMapping":\[\]}' "$STUB_LOG"
+}
+check "Caps Lock: remap + login agent, idempotent, and removable (profile overrides base)" t_capslock
+
+t_browser() {
+  system_env
+  printf 'browser = com.brave.Browser\n' >>"$MACOS_DOTFILES/macos/profiles/base/system.conf"
+  "$M" defaults apply >"$SANDBOX/o" 2>&1 || { cat "$SANDBOX/o"; return 1; }
+  grep -q '^duti -s com.brave.Browser http$' "$STUB_LOG" && grep -q '^duti -s com.brave.Browser https$' "$STUB_LOG" &&
+    grep -q '^browser|' "$MACOS_STATE/pending" || { cat "$STUB_LOG"; return 1; }
+  # Once the user confirms, LaunchServices records it (lowercased).
+  mkdir -p "$HOME/Library/Preferences/com.apple.LaunchServices"
+  cat >"$HOME/Library/Preferences/com.apple.LaunchServices/com.apple.launchservices.secure.plist" <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0"><dict><key>LSHandlers</key><array>
+<dict><key>LSHandlerURLScheme</key><string>http</string><key>LSHandlerRoleAll</key><string>com.brave.browser</string></dict>
+</array></dict></plist>
+PLIST
+  : >"$STUB_LOG"
+  "$M" defaults apply >"$SANDBOX/o" 2>&1 || { cat "$SANDBOX/o"; return 1; }
+  ! grep -q '^duti' "$STUB_LOG" && ! grep -q '^browser|' "$MACOS_STATE/pending"
+}
+check "default browser: set via duti, pending until confirmed, then left alone" t_browser
+
+t_brave_policy() {
+  system_env
+  printf '<plist/>\n' >"$MACOS_DOTFILES/macos/profiles/base/brave.mobileconfig"
+  "$M" defaults apply >"$SANDBOX/o" 2>&1 || { cat "$SANDBOX/o"; return 1; }
+  grep -q "^open $MACOS_DOTFILES/macos/profiles/base/brave.mobileconfig" "$STUB_LOG" && grep -q '^brave-policy|' "$MACOS_STATE/pending" || return 1
+  mkdir -p "$MANAGED_PREFS_DIR" && touch "$MANAGED_PREFS_DIR/com.brave.Browser.plist"
+  : >"$STUB_LOG"
+  "$M" defaults apply >/dev/null 2>&1
+  ! grep -q '^open' "$STUB_LOG" && ! grep -q '^brave-policy|' "$MACOS_STATE/pending"
+}
+check "Brave policy: opened for approval once, cleared when installed" t_brave_policy
+
+t_system_check() {
+  system_env
+  printf 'browser = com.brave.Browser\n' >>"$MACOS_DOTFILES/macos/profiles/base/system.conf"
+  "$M" defaults check >"$SANDBOX/o" 2>&1 && return 1
+  grep -q 'drift  dock:' "$SANDBOX/o" && grep -q 'drift  browser: default browser is com.apple.safari' "$SANDBOX/o" &&
+    ! grep -qE '^(duti|dockutil --add|open)' "$STUB_LOG"
+}
+check "defaults check also reports Dock and browser drift, read-only" t_system_check
 
 # ---------------------------------------------------------------------------
 section "boot.sh"

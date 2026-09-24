@@ -34,10 +34,12 @@ _macos_run_exit_hooks() {
 }
 
 # Report the first failure only: with errtrace the trap fires again in every
-# calling function as the error unwinds.
+# calling function as the error unwinds, and in command substitutions.
 _macos_on_err() {
   local rc=$?
-  if [ -z "${_MACOS_ERR_REPORTED:-}" ]; then
+  # Inside $(...) a failure may be expected (e.g. reading a missing file);
+  # if it matters, it propagates and the main shell reports it.
+  if [ -z "${_MACOS_ERR_REPORTED:-}" ] && [ "${BASH_SUBSHELL:-0}" -eq 0 ]; then
     _MACOS_ERR_REPORTED=1
     warn "failed (exit $rc) during: ${MACOS_STEP:-${0##*/}} [${BASH_SOURCE[1]:-?}:${BASH_LINENO[0]:-?}]"
   fi

@@ -8,7 +8,7 @@
 
 # shellcheck source=lib/common.sh
 . "${MACOS_ROOT:=$(cd -- "$(dirname -- "$0")/.." && pwd -P)}/lib/common.sh"
-for _lib in run prompt lock sudo brew profile dotfiles; do
+for _lib in run prompt lock pending sudo brew profile dotfiles defaults system; do
   # shellcheck source=/dev/null
   . "$MACOS_ROOT/lib/$_lib.sh"
 done
@@ -54,6 +54,8 @@ dotfiles_link
 step "Runtimes (mise)"
 mise_install
 
-step "Not built yet"
-skip "defaults arrive in phase 5"
+step "Defaults"
+defaults_apply
+system_apply
+
 ok "apply finished"

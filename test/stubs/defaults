@@ -1,0 +1,44 @@
+#!/bin/bash
+# Stateful test double for `defaults`: read, read-type, write and delete
+# against a flat file ($STUB_DEFAULTS_DB) of `host|domain|key|type|value`
+# lines, so tests can check idempotency and read-back. Logged like the
+# generic stub. Never touches real preferences.
+
+printf 'defaults %s\n' "$*" >>"${STUB_LOG:-/dev/null}"
+db="${STUB_DEFAULTS_DB:-/dev/null}"
+[ -f "$db" ] || : >"$db" 2>/dev/null
+
+host=global
+if [ "${1:-}" = -currentHost ]; then
+  host=current
+  shift
+fi
+cmd="${1:-}" dom="${2:-}" key="${3:-}"
+[ "$dom" = NSGlobalDomain ] && dom=-g
+
+lookup() { awk -F'|' -v h="$host" -v d="$dom" -v k="$key" '$1 == h && $2 == d && $3 == k { l = $0 } END { if (l == "") exit 1; print l }' "$db"; }
+
+case "$cmd" in
+  read)
+    line="$(lookup)" || exit 1
+    printf '%s\n' "${line##*|}"
+    ;;
+  read-type)
+    line="$(lookup)" || exit 1
+    printf 'Type is %s\n' "$(printf '%s' "$line" | cut -d'|' -f4)"
+    ;;
+  write)
+    case "${4:-}" in
+      -bool) type=boolean; case "${5:-}" in true | yes | 1) val=1 ;; *) val=0 ;; esac ;;
+      -int) type=integer; val="$5" ;;
+      -float) type=float; val="$5" ;;
+      -string) type=string; val="$5" ;;
+      *) exit 1 ;;
+    esac
+    [ -n "${STUB_DEFAULTS_IGNORE_WRITES:-}" ] && exit 0
+    awk -F'|' -v h="$host" -v d="$dom" -v k="$key" '!($1 == h && $2 == d && $3 == k)' "$db" >"$db.tmp"
+    printf '%s|%s|%s|%s|%s\n' "$host" "$dom" "$key" "$type" "$val" >>"$db.tmp"
+    mv "$db.tmp" "$db"
+    ;;
+  *) exit 0 ;;
+esac

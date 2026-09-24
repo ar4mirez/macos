@@ -13,3 +13,9 @@
 
 # Where .app bundles installed outside Homebrew live (checked by `apps adopt`).
 : "${MACOS_APPLICATIONS_DIRS:=/Applications $HOME/Applications}"
+
+# Per-user managed preferences written when a configuration profile is
+# approved (used to detect an installed Brave policy).
+: "${MANAGED_PREFS_DIR:=/Library/Managed Preferences/$USER}"
+# LaunchServices handler database (default browser lives here).
+: "${LAUNCHSERVICES_PLIST:=$HOME/Library/Preferences/com.apple.LaunchServices/com.apple.launchservices.secure.plist}"

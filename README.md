@@ -8,7 +8,7 @@ A small, declarative Bash engine that sets up and maintains my Macs. It covers:
 - **Identity:** the 1Password SSH agent, SSH commit signing, and per-org git identities.
 - **Profiles:** `base` plus one of `work` or `personal`.
 
-> **Status: Phase 4 (dotfiles).** Bootstrap, `apply`, `upgrade`, `apps` and `dotfiles` work, and mise runtimes are installed. Defaults, identity and `doctor` are still placeholders that exit with code `2`. See [Roadmap](#roadmap).
+> **Status: Phase 5 (defaults).** Bootstrap, `apply`, `upgrade`, `apps`, `dotfiles` and `defaults` work. Identity, `doctor`, `update` and `uninstall` are still placeholders that exit with code `2`. See [Roadmap](#roadmap).
 
 ## Engine vs. data
 
@@ -128,7 +128,7 @@ Conventions:
 2. **Bootstrap:** `boot.sh`, profile selection, security baseline, `gh` auth, HTTPS dotfiles clone, Brewfile install. *(done)*
 3. **Apps:** `apply` / `--prune` / `upgrade` / `apps add|remove|adopt`. *(done)*
 4. **Dotfiles:** Stow link, unlink and status, with backup of conflicting files; mise runtimes. *(done)*
-5. **Defaults:** the `defaults.conf` engine and imperative steps (Dock, Caps Lock, browser).
+5. **Defaults:** the `defaults.conf` engine and imperative steps (Dock, Caps Lock, browser, Brave policy). *(done)*
 6. **Identity:** 1Password agent, `includeIf` per org, signing keys.
 7. **Operations:** migrations, `doctor`, `update`, `uninstall`.
 

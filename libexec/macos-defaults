@@ -1,8 +1,51 @@
 #!/usr/bin/env bash
 # macos:summary=Apply or check the declared macOS defaults
 # macos:usage=macos defaults apply|check [--dry-run]
+#
+#   apply   write every drifted defaults.conf key (verified by reading it
+#           back), then the Dock layout, Caps Lock, default browser and
+#           Brave policy from dock.conf / system.conf / brave.mobileconfig
+#   check   report drift only; exits 1 if anything differs
 
 # shellcheck source=lib/common.sh
 . "${MACOS_ROOT:=$(cd -- "$(dirname -- "$0")/.." && pwd -P)}/lib/common.sh"
+for _lib in run lock profile pending defaults system; do
+  # shellcheck source=/dev/null
+  . "$MACOS_ROOT/lib/$_lib.sh"
+done
+unset _lib
 
-not_implemented 5
+action="${1:-check}"
+[ $# -gt 0 ] && shift
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -n | --dry-run) MACOS_DRY_RUN=1 ;;
+    *) die "unknown option: $1 (see 'macos defaults --help')" ;;
+  esac
+  shift
+done
+export MACOS_DRY_RUN
+
+require_profile
+
+case "$action" in
+  apply)
+    lock_acquire
+    dry_run || log_to_file
+    dry_run && say "Dry run: nothing will be changed."
+    step "Defaults ($MACOS_PROFILE profile)"
+    defaults_apply
+    step "System settings"
+    system_apply
+    ;;
+  check)
+    rc=0
+    defaults_check || rc=1
+    system_check || rc=1
+    if [ "$rc" -eq 0 ]; then
+      ok "no drift: this Mac matches its declared defaults"
+    fi
+    exit "$rc"
+    ;;
+  *) die "unknown action '$action' (apply or check)" ;;
+esac
