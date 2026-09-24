@@ -49,6 +49,9 @@ export MACOS_MIGRATIONS_DIR="$SANDBOX/migrations"
 ln -s "$ROOT/test/stubs/stub" "$SANDBOX/bin/tailscale-cli"
 export TAILSCALE_CLI="$SANDBOX/bin/tailscale-cli"
 export PAM_SUDO_LOCAL="$SANDBOX/etc/sudo_local"
+# Sandboxed like the other system paths: the real one exists once a Mac has
+# run `macos apply`, and must never influence (or be touched by) a test.
+export PAM_REATTACH_DEST="$SANDBOX/usrlocal/lib/pam/pam_reattach.so"
 export HOMEBREW_PREFIX="$SANDBOX/homebrew"
 export MACOS_SUDO_REFRESH=1
 mkdir -p "$SANDBOX/etc" "$HOMEBREW_PREFIX/bin"
@@ -1174,17 +1177,7 @@ PLIST
 }
 check "default browser: set via duti, pending until confirmed, then left alone" t_browser
 
-t_brave_policy() {
-  system_env
-  printf '<plist/>\n' >"$MACOS_DOTFILES/macos/profiles/base/brave.mobileconfig"
-  "$M" defaults apply >"$SANDBOX/o" 2>&1 || { cat "$SANDBOX/o"; return 1; }
-  grep -q "^open $MACOS_DOTFILES/macos/profiles/base/brave.mobileconfig" "$STUB_LOG" && grep -q '^brave-policy|' "$MACOS_STATE/pending" || return 1
-  mkdir -p "$MANAGED_PREFS_DIR" && touch "$MANAGED_PREFS_DIR/com.brave.Browser.plist"
-  : >"$STUB_LOG"
-  "$M" defaults apply >/dev/null 2>&1
-  ! grep -q '^open' "$STUB_LOG" && ! grep -q '^brave-policy|' "$MACOS_STATE/pending"
-}
-check "Brave policy: opened for approval once, cleared when installed" t_brave_policy
+
 
 t_system_check() {
   system_env
@@ -1733,6 +1726,114 @@ t_doctor_no_profile() {
   grep -q "FAIL  no profile" "$SANDBOX/o"
 }
 check "doctor fails clearly before bootstrap" t_doctor_no_profile
+
+# ---------------------------------------------------------------------------
+section "Brave"
+
+EXT1=aeblfdkhhhdcdjpifhhbdiojplfjncoa EXT2=fcoeoabgfenejglbffodgkkbkcdhcgfn EXT3=cnjifjpddelmedmihgijeibhnjfabmlf
+BRAVE_LIBS='. "$1/lib/common.sh"; . "$1/lib/run.sh"; . "$1/lib/profile.sh"; . "$1/lib/pending.sh"; . "$1/lib/brave.sh"; '
+
+brave_env() {
+  system_env
+  printf '{"TorDisabled": true, "Nested": {"a": 1}}\n' >"$MACOS_DOTFILES/macos/profiles/base/brave.json"
+  printf '{"Nested": {"b": 2}, "BraveAIChatEnabled": false}\n' >"$MACOS_DOTFILES/macos/profiles/work/brave.json"
+  printf '# c\n%s | 1Password | normal | pin\n%s | Claude | normal |\n' "$EXT1" "$EXT2" >"$MACOS_DOTFILES/macos/profiles/base/brave-extensions.conf"
+  printf '%s | Claude | force\n' "$EXT2" >"$MACOS_DOTFILES/macos/profiles/work/brave-extensions.conf"
+  rm -rf "$MANAGED_PREFS_DIR" "$HOME/Library/Application Support/BraveSoftware"
+}
+
+# managed_from_desired — install the desired policy as if the profile had been approved.
+managed_from_desired() {
+  mkdir -p "$MANAGED_PREFS_DIR"
+  /bin/bash -c "$BRAVE_LIBS"'brave_policy_json' _ "$ROOT" |
+    jq '. + {PayloadUUID: "X", _manualProfile: true}' | plutil -convert xml1 -o "$MANAGED_PREFS_DIR/com.brave.Browser.plist" -
+}
+
+t_brave_policy_json() {
+  brave_env
+  local j; j="$(/bin/bash -c "$BRAVE_LIBS"'brave_policy_json' _ "$ROOT")" || return 1
+  [ "$(jq -c .Nested <<<"$j")" = '{"a":1,"b":2}' ] && [ "$(jq -r .TorDisabled <<<"$j")" = true ] &&
+    [ "$(jq -r ".ExtensionSettings[\"$EXT1\"].installation_mode" <<<"$j")" = normal_installed ] &&
+    [ "$(jq -r ".ExtensionSettings[\"$EXT1\"].toolbar_pin" <<<"$j")" = force_pinned ] &&
+    [ "$(jq -r ".ExtensionSettings[\"$EXT2\"].installation_mode" <<<"$j")" = force_installed ] &&
+    [ "$(jq -r ".ExtensionSettings[\"$EXT2\"].toolbar_pin // \"none\"" <<<"$j")" = none ] &&
+    [ "$(jq -r ".ExtensionSettings[\"$EXT1\"].update_url" <<<"$j")" = https://clients2.google.com/service/update2/crx ] ||
+    { echo "$j"; return 1; }
+}
+check "Brave policy merges brave.json (deep) and extensions per profile (later wins)" t_brave_policy_json
+
+t_brave_mobileconfig() {
+  brave_env
+  /bin/bash -c "$BRAVE_LIBS"'brave_mobileconfig "$(brave_policy_json)" "$2/a.mobileconfig"; brave_mobileconfig "$(brave_policy_json)" "$2/b.mobileconfig"' _ "$ROOT" "$SANDBOX" || return 1
+  plutil -lint "$SANDBOX/a.mobileconfig" >/dev/null && cmp -s "$SANDBOX/a.mobileconfig" "$SANDBOX/b.mobileconfig" &&
+    [ "$(plutil -extract PayloadContent.0.PayloadType raw "$SANDBOX/a.mobileconfig")" = com.brave.Browser ] &&
+    [ "$(plutil -extract PayloadScope raw "$SANDBOX/a.mobileconfig")" = User ] &&
+    plutil -extract "PayloadContent.0.ExtensionSettings.$EXT1.installation_mode" raw "$SANDBOX/a.mobileconfig" | grep -qx normal_installed
+}
+check "the Brave configuration profile is valid and stable across renders (same UUIDs)" t_brave_mobileconfig
+
+t_brave_apply_opens_then_clears() {
+  brave_env
+  "$M" defaults apply >"$SANDBOX/o" 2>&1 || { cat "$SANDBOX/o"; return 1; }
+  grep -q "^open $MACOS_STATE/brave.mobileconfig" "$STUB_LOG" && grep -q '^brave-policy|' "$MACOS_STATE/pending" || { cat "$SANDBOX/o"; return 1; }
+  managed_from_desired; : >"$STUB_LOG"
+  "$M" defaults apply >"$SANDBOX/o" 2>&1 || { cat "$SANDBOX/o"; return 1; }
+  ! grep -q '^open' "$STUB_LOG" && ! grep -q '^brave-policy|' "$MACOS_STATE/pending" && grep -q 'Brave policy up to date (2 extension' "$SANDBOX/o"
+}
+check "Brave: profile opened for approval, then left alone once macOS applied it" t_brave_apply_opens_then_clears
+
+t_brave_drift_on_new_extension() {
+  brave_env; managed_from_desired
+  printf '%s | Obsidian Web Clipper | normal |\n' "$EXT3" >>"$MACOS_DOTFILES/macos/profiles/base/brave-extensions.conf"
+  "$M" defaults check >"$SANDBOX/o" 2>&1 && return 1
+  grep -q 'drift  brave_policy: Brave policy differs' "$SANDBOX/o" || return 1
+  "$M" defaults apply >/dev/null 2>&1 && grep -q '^open ' "$STUB_LOG" &&
+    plutil -extract "PayloadContent.0.ExtensionSettings.$EXT3.installation_mode" raw "$MACOS_STATE/brave.mobileconfig" | grep -qx normal_installed
+}
+check "Brave: a newly declared extension is drift until the updated profile is approved" t_brave_drift_on_new_extension
+
+t_brave_validation() {
+  brave_env
+  printf 'notanid | X | normal |\n' >>"$MACOS_DOTFILES/macos/profiles/base/brave-extensions.conf"
+  "$M" defaults apply >"$SANDBOX/o" 2>&1 && return 1
+  grep -q 'not a Chrome Web Store id: notanid' "$SANDBOX/o" || return 1
+  brave_env; printf '%s | X | always |\n' "$EXT3" >>"$MACOS_DOTFILES/macos/profiles/base/brave-extensions.conf"
+  "$M" defaults apply >"$SANDBOX/o" 2>&1 && return 1
+  grep -q 'mode must be normal or force, not always' "$SANDBOX/o"
+}
+check "Brave: bad extension ids and modes stop the run" t_brave_validation
+
+t_brave_add_remove() {
+  brave_env
+  STUB_CURL_OUT='<html><title>Obsidian Web Clipper - Chrome Web Store</title>' \
+    "$M" brave add "https://chromewebstore.google.com/detail/obsidian-web-clipper/$EXT3" --pin >"$SANDBOX/o" 2>&1 || { cat "$SANDBOX/o"; return 1; }
+  local B="$MACOS_DOTFILES/macos/profiles/base/brave-extensions.conf"
+  grep -qx "$EXT3 | Obsidian Web Clipper | normal | pin" "$B" && grep -q '^open ' "$STUB_LOG" || { cat "$B" "$SANDBOX/o"; return 1; }
+  "$M" brave add "$EXT3" >"$SANDBOX/o" 2>&1 && grep -q 'already declared in base' "$SANDBOX/o" || return 1
+  STUB_CURL_RC=22 "$M" brave add ppppppppppppppppppppppppppppppp >"$SANDBOX/o" 2>&1
+  STUB_CURL_RC=22 "$M" brave add pppppppppppppppppppppppppppppppp >"$SANDBOX/o" 2>&1 && return 1
+  grep -q 'could not find pppppppppppppppppppppppppppppppp on the Chrome Web Store' "$SANDBOX/o" || { cat "$SANDBOX/o"; return 1; }
+  "$M" brave remove "obsidian web clipper" >"$SANDBOX/o" 2>&1 || { cat "$SANDBOX/o"; return 1; }
+  ! grep -q "$EXT3" "$B" && grep -q "^$EXT1 " "$B"
+}
+check "brave add (by store URL, name from the store) / duplicate / unknown id / remove by name" t_brave_add_remove
+
+t_brave_adopt() {
+  brave_env
+  local P="$HOME/Library/Application Support/BraveSoftware/Brave-Browser/Profile 1"
+  mkdir -p "$P/Extensions/$EXT3/1.2.0_0/_locales/en"
+  printf '{"name": "__MSG_appName__", "default_locale": "en"}' >"$P/Extensions/$EXT3/1.2.0_0/manifest.json"
+  printf '{"appName": {"message": "Obsidian Web Clipper"}}' >"$P/Extensions/$EXT3/1.2.0_0/_locales/en/messages.json"
+  printf '{"extensions": {"settings": {"%s": {"location": 1, "from_webstore": true}, "%s": {"location": 1}, "mhjfbmdgcfjbbpaeojofohoefgiehjai": {"location": 5}}}}' \
+    "$EXT3" "$EXT1" >"$P/Secure Preferences"
+  "$M" brave list >"$SANDBOX/l" 2>&1
+  grep -q "$EXT3 *Obsidian Web Clipper *in Profile 1" "$SANDBOX/l" || { cat "$SANDBOX/l"; return 1; }
+  "$M" brave adopt --yes --profile work >"$SANDBOX/o" 2>&1 || { cat "$SANDBOX/o"; return 1; }
+  local W2="$MACOS_DOTFILES/macos/profiles/work/brave-extensions.conf"
+  grep -qx "$EXT3 | Obsidian Web Clipper | normal |" "$W2" && ! grep -q mhjfbmdgcfjbbpaeojofohoefgiehjai "$W2" &&
+    [ "$(grep -c "$EXT1" "$MACOS_DOTFILES/macos/profiles/base/brave-extensions.conf" "$W2" | awk -F: '{s+=$2} END {print s}')" -eq 1 ] || { cat "$W2" "$SANDBOX/o"; return 1; }
+}
+check "brave adopt declares extensions installed by hand (store installs only, names from manifests)" t_brave_adopt
 
 # ---------------------------------------------------------------------------
 section "review 2 regressions"

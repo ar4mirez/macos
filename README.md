@@ -22,7 +22,8 @@ This repo is only the **engine**. It holds no personal data. Everything personal
       system.conf         capslock, browser (key = value)
       dock.conf           Dock layout (a profile's replaces base's)
       stow.list           Stow packages to link
-      brave.mobileconfig  Brave policy profile (base)
+      brave.json          Brave policies (merged across profiles)
+      brave-extensions.conf  extensions installed in every Brave profile
   macos/orgs.conf         git identities (see Identity)
   zsh/ git/ ssh/ …        Stow packages, each mirroring $HOME
 ```
@@ -30,7 +31,7 @@ This repo is only the **engine**. It holds no personal data. Everything personal
 | Path | Owner | Notes |
 |---|---|---|
 | `~/.local/share/macos` | engine (this repo) | Replaced on `macos update`. Never edit it. |
-| `~/.dotfiles` | you (private repo) | Your apps, settings and configs. Edit and commit here. |
+| `~/.dotfiles` | you (private repo) | Your apps, settings, Brave extensions and configs. Edit and commit here. |
 | `~/.local/state/macos` | generated | `machine.env`, merged Brewfile, logs (private), backups, pending manual steps |
 
 ## Install
@@ -70,6 +71,7 @@ macos apps        add | remove | adopt apps in a profile Brewfile
 macos dotfiles    link | unlink | status
 macos defaults    apply | check
 macos identity    1Password SSH agent, git identities, commit signing
+macos brave       list | add | remove | adopt extensions for every Brave profile
 macos doctor      Report what is actually true, plus pending manual steps
 macos update      Pull engine + dotfiles, run migrations, apply
 macos uninstall   Unlink dotfiles, remove the engine (apps are left alone)
@@ -133,7 +135,28 @@ macos defaults apply     # also part of `macos apply` and `macos bootstrap`
 - **`system.conf`:**
   - `capslock` (`none`/`escape`/`control`). The remap uses `hidutil`, plus a LaunchAgent that re-applies it at each login.
   - `browser`, a bundle ID set with `duti`. macOS asks you to confirm the change once.
-- **`brave.mobileconfig`:** a user configuration profile that you approve once in System Settings.
+- **Brave:** `brave.json` (policies) and `brave-extensions.conf` (extensions) become one user configuration profile, which you approve in System Settings whenever it changes. See [Brave extensions](#brave-extensions).
+
+## Brave extensions
+
+Chromium keeps a hand-installed extension in one browser profile only. Extensions declared as **policy** are installed in **every** Brave profile, including profiles created later. `brave-extensions.conf` declares them:
+
+```
+id                               | name      | mode   | pin
+aeblfdkhhhdcdjpifhhbdiojplfjncoa | 1Password | normal | pin
+```
+
+- **`mode`:** `normal` extensions install automatically and can be turned off in a profile, but not removed. `force` extensions can't be turned off either.
+- **`pin`:** keeps the extension on the toolbar.
+
+```sh
+macos brave list                         # declared, whether the active policy has them, hand-installed extras
+macos brave add <store url|id> [--pin]   # declare (name looked up on the Chrome Web Store); default profile: base
+macos brave remove "<name or id>"
+macos brave adopt                        # installed one by hand? declare it so every profile gets it
+```
+
+Any change is regenerated into the configuration profile and opened for approval. `defaults check` and `doctor` report it until macOS applies it. Restart Brave afterwards, and each profile installs the extensions on its own.
 
 ## Identity
 

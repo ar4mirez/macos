@@ -8,7 +8,7 @@
 
 # shellcheck source=lib/common.sh
 . "${MACOS_ROOT:=$(cd -- "$(dirname -- "$0")/.." && pwd -P)}/lib/common.sh"
-for _lib in run prompt lock pending sudo security brew repo gh profile dotfiles defaults system identity engine; do
+for _lib in run prompt lock pending sudo security brew repo gh profile dotfiles defaults system brave identity engine; do
   # shellcheck source=/dev/null
   . "$MACOS_ROOT/lib/$_lib.sh"
 done

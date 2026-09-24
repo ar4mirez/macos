@@ -4,12 +4,13 @@
 #
 #   apply   write every drifted defaults.conf key (verified by reading it
 #           back), then the Dock layout, Caps Lock, default browser and
-#           Brave policy from dock.conf / system.conf / brave.mobileconfig
+#           Brave policy (settings + extensions in every Brave profile) from
+#           dock.conf / system.conf / brave.json / brave-extensions.conf
 #   check   report drift only; exits 1 if anything differs
 
 # shellcheck source=lib/common.sh
 . "${MACOS_ROOT:=$(cd -- "$(dirname -- "$0")/.." && pwd -P)}/lib/common.sh"
-for _lib in run lock profile pending defaults system; do
+for _lib in run lock profile pending defaults system brave; do
   # shellcheck source=/dev/null
   . "$MACOS_ROOT/lib/$_lib.sh"
 done

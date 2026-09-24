@@ -236,38 +236,6 @@ browser_apply() {
   ok "default browser → $want (macOS asks you to confirm)"
 }
 
-# --- Brave policy ----------------------------------------------------------
-
-brave_policy_file() { profile_file brave.mobileconfig; }
-
-# Installed once the profile is approved: macOS then writes the policies as
-# managed preferences for this user.
-brave_policy_state() {
-  [ -n "$(brave_policy_file)" ] || { echo ok; return; }
-  if [ -f "$MANAGED_PREFS_DIR/com.brave.Browser.plist" ]; then
-    echo ok
-  else
-    echo "drift Brave policy profile not installed"
-  fi
-}
-
-brave_policy_apply() {
-  local f
-  f="$(brave_policy_file)"
-  if [ -z "$f" ]; then
-    skip "no Brave policy declared"
-    return 0
-  fi
-  if [ "$(brave_policy_state)" = ok ]; then
-    skip "Brave policy profile installed"
-    pending_done brave-policy
-    return 0
-  fi
-  run open "$f"
-  pending_add brave-policy "Approve the 'Brave lean policy' profile in System Settings → General → Device Management, then restart Brave"
-  ok "Brave policy profile opened for approval"
-}
-
 # --- All -------------------------------------------------------------------
 
 system_apply() {

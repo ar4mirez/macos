@@ -1,0 +1,197 @@
+#!/usr/bin/env bash
+# macos:summary=Brave extensions for every Brave profile: list, add, remove, adopt
+# macos:usage=macos brave list|add|remove|adopt [<id|store url|name>] [--name <n>] [--mode normal|force] [--pin] [--profile <p>] [--dry-run] [--yes]
+#
+# Extensions declared here are installed in every Brave profile, including
+# ones created later (Chromium ExtensionSettings policy, via the Brave
+# configuration profile). Extensions installed by hand live in one profile
+# only; `adopt` declares them so they reach every profile.
+#
+#   list     declared extensions, whether the active policy has them, and
+#            extensions installed by hand that are not declared yet
+#   add      declare one (default profile: base, i.e. every Mac)
+#   remove   undeclare one (by id or name)
+#   adopt    declare the extensions installed by hand in any Brave profile
+#
+# Edits land in the dotfiles repo (brave-extensions.conf); commit them there.
+# Changes take effect after approving the updated profile in System Settings
+# and restarting Brave.
+
+# shellcheck source=lib/common.sh
+. "${MACOS_ROOT:=$(cd -- "$(dirname -- "$0")/.." && pwd -P)}/lib/common.sh"
+for _lib in run prompt lock pending profile brave; do
+  # shellcheck source=/dev/null
+  . "$MACOS_ROOT/lib/$_lib.sh"
+done
+unset _lib
+
+action="${1:-list}"
+[ $# -gt 0 ] && shift
+target="" name="" mode=normal pin="" target_profile=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --name) name="${2:?--name needs a value}"; shift ;;
+    --mode) mode="${2:?--mode needs a value}"; shift ;;
+    --pin) pin=pin ;;
+    --profile) target_profile="${2:?--profile needs a value}"; shift ;;
+    --profile=*) target_profile="${1#*=}" ;;
+    -n | --dry-run) MACOS_DRY_RUN=1 ;;
+    -y | --yes) MACOS_YES=1 ;;
+    -*) die "unknown option: $1 (see 'macos brave --help')" ;;
+    *)
+      [ -z "$target" ] || die "one extension at a time (got '$target' and '$1')"
+      target="$1"
+      ;;
+  esac
+  shift
+done
+export MACOS_DRY_RUN MACOS_YES
+case "$mode" in normal | force) ;; *) die "--mode must be normal or force" ;; esac
+
+require_profile
+
+conf_for() { printf '%s\n' "$(profiles_dir)/$1/brave-extensions.conf"; }
+
+# ext_id <id or Chrome Web Store URL> — the 32-letter id, or fail.
+ext_id() {
+  local id
+  id="$(grep -oE '[a-p]{32}' <<<"$1" | tail -n 1)"
+  [ -n "$id" ] || die "'$1' is not a Chrome Web Store id or URL (ids are 32 letters a-p)"
+  printf '%s\n' "$id"
+}
+
+# store_name <id> — the listing's title from the Chrome Web Store, or empty.
+store_name() {
+  curl -fsSL --max-time 15 -A 'Mozilla/5.0' "https://chromewebstore.google.com/detail/$1" 2>/dev/null |
+    grep -o '<title>[^<]*</title>' | head -n 1 | sed -e 's/<[^>]*>//g' -e 's/ - Chrome Web Store$//' |
+    grep -v '^Chrome Web Store$' || true
+}
+
+declared_in_file() { [ -f "$1" ] && grep -qE "^[[:space:]]*${2}[[:space:]]*\|" "$1"; }
+
+append_line() { # append_line <conf> <id> <name> <mode> <pin>
+  local conf="$1" existing=""
+  [ -f "$conf" ] && existing="$(cat "$conf")"
+  if [ -z "$existing" ]; then
+    existing="# Brave extensions for every Brave profile (see base/brave-extensions.conf).
+#   id | name | mode | pin"
+  fi
+  printf '%s\n%s | %s | %s | %s\n' "$existing" "$2" "$3" "$4" "$5" | sed 's/ | $/ |/' | write_file "$conf"
+}
+
+apply_policy() {
+  step "Brave policy"
+  brave_policy_apply
+  if ! dry_run; then
+    local changed
+    changed="$(git -C "$MACOS_DOTFILES" status --porcelain -- macos 2>/dev/null)"
+    if [ -n "$changed" ]; then
+      say "Commit the change in $MACOS_DOTFILES:"
+      printf '    git -C %s commit -am "%s"\n' "$MACOS_DOTFILES" "$1" >&2
+    fi
+  fi
+}
+
+brave_list() {
+  local active id n m pin state lines
+  active="$(brave_policy_active | jq -r '.ExtensionSettings // {} | keys[]' 2>/dev/null || true)"
+  lines="$(brave_extension_lines)" || exit 1
+  printf '%-34s %-26s %-7s %-4s %s\n' ID NAME MODE PIN "IN EVERY PROFILE?"
+  while IFS='|' read -r id n m pin; do
+    [ -n "$id" ] || continue
+    if grep -qx "$id" <<<"$active"; then state=yes; else state="not yet (approve the updated Brave profile)"; fi
+    printf '%-34s %-26s %-7s %-4s %s\n' "$id" "$n" "$m" "${pin:--}" "$state"
+  done <<<"$lines"
+  local hand
+  hand="$(brave_installed_extensions)"
+  if [ -n "$hand" ]; then
+    printf '\nInstalled by hand (one profile only):\n'
+    while IFS='|' read -r id n p; do
+      [ -n "$id" ] || continue
+      grep -q "^$id|" <<<"$lines" && continue
+      printf '  %-34s %-26s in %s   → macos brave adopt\n' "$id" "$(brave_extension_name "$id" "$p")" "$p"
+    done <<<"$hand"
+  fi
+}
+
+brave_add() {
+  local id profile="${target_profile:-base}" conf
+  [ -n "$target" ] || die "usage: macos brave add <id|store url> [--name <n>] [--mode normal|force] [--pin] [--profile <p>]"
+  id="$(ext_id "$target")"
+  profile_exists "$profile" || die "no profile '$profile' in $(profiles_dir)"
+  conf="$(conf_for "$profile")"
+  if declared_in_file "$conf" "$id"; then
+    skip "$id is already declared in $profile"
+  else
+    if [ -z "$name" ]; then
+      name="$(store_name "$id")"
+      [ -n "$name" ] || die "could not find $id on the Chrome Web Store; check the id, or pass --name"
+    fi
+    append_line "$conf" "$id" "$name" "$mode" "$pin"
+    ok "declared $name ($id) in $profile: $mode${pin:+, pinned}"
+  fi
+  lock_acquire
+  apply_policy "Brave: add $name"
+}
+
+brave_remove() {
+  local p conf id removed=""
+  [ -n "$target" ] || die "usage: macos brave remove <id|name> [--profile <p>]"
+  for p in $(active_profiles); do
+    [ -z "$target_profile" ] || [ "$p" = "$target_profile" ] || continue
+    conf="$(conf_for "$p")"
+    [ -f "$conf" ] || continue
+    id="$(awk -F'|' -v t="$target" '
+      /^[[:space:]]*(#|$)/ { next }
+      { i = $1; n = $2; gsub(/^[ \t]+|[ \t]+$/, "", i); gsub(/^[ \t]+|[ \t]+$/, "", n) }
+      i == t || tolower(n) == tolower(t) { print i; exit }' "$conf")"
+    [ -n "$id" ] || continue
+    grep -vE "^[[:space:]]*${id}[[:space:]]*\|" "$conf" | write_file "$conf"
+    ok "removed $target from $p"
+    removed="$removed $p"
+  done
+  [ -n "$removed" ] || die "'$target' is not declared in any active profile's brave-extensions.conf"
+  lock_acquire
+  apply_policy "Brave: remove $target"
+}
+
+brave_adopt() {
+  local hand lines id n p profile adopted=0
+  hand="$(brave_installed_extensions)"
+  lines="$(brave_extension_lines)" || exit 1
+  if [ -n "$target_profile" ] && ! grep -qx "$target_profile" <<<"$(active_profiles)"; then
+    die "--profile must be one this Mac uses: $(active_profiles | tr '\n' ' ')"
+  fi
+  while IFS='|' read -r id n p; do
+    [ -n "$id" ] || continue
+    grep -q "^$id|" <<<"$lines" && continue
+    n="$(brave_extension_name "$id" "$p")"
+    if [ -n "$target_profile" ]; then
+      profile="$target_profile"
+    elif [ "$MACOS_YES" = 1 ]; then
+      warn "$n ($id) is installed by hand in Brave's $p; pass --profile <p> with --yes to adopt it"
+      continue
+    else
+      # shellcheck disable=SC2046
+      choose profile "$n is installed by hand in Brave's '$p' only. Put it in every Brave profile on which Macs?" $(active_profiles) skip
+    fi
+    [ "$profile" = skip ] && { skip "left $n alone"; continue; }
+    append_line "$(conf_for "$profile")" "$id" "$n" normal ""
+    ok "declared $n ($id) in $profile"
+    adopted=$((adopted + 1))
+  done <<<"$hand"
+  if [ "$adopted" -eq 0 ]; then
+    ok "every extension installed by hand is already declared"
+    return 0
+  fi
+  lock_acquire
+  apply_policy "Brave: adopt extensions installed by hand"
+}
+
+case "$action" in
+  list | ls) brave_list ;;
+  add) brave_add ;;
+  remove | rm) brave_remove ;;
+  adopt) brave_adopt ;;
+  *) die "unknown action '$action' (list, add, remove or adopt)" ;;
+esac
