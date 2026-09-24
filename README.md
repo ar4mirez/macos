@@ -131,6 +131,7 @@ Conventions:
 5. **Defaults:** the `defaults.conf` engine and imperative steps (Dock, Caps Lock, browser, Brave policy). *(done)*
 6. **Identity:** 1Password agent, `includeIf` per org, signing keys. *(done)*
 7. **Operations:** migrations, `doctor`, `update`, `uninstall`. *(done)*
+8. **Fresh-VM end-to-end test:** run `boot.sh` on a clean macOS VM. *(to do; see [docs/e2e-vm.md](docs/e2e-vm.md))*
 
 ## License
 
