@@ -80,4 +80,8 @@ engine_link_cli
 # Hand over to the (possibly new) engine. exec keeps our pid, so release
 # the lock first or apply would find it held by itself.
 lock_release
+if [ "${_MACOS_DIED_OWNER:-}" = "$$" ]; then
+  rm -f "$_MACOS_DIED_FLAG"
+fi
+unset _MACOS_DIED_FLAG _MACOS_DIED_OWNER
 exec "$MACOS_ROOT/bin/macos" apply ${apply_args[@]+"${apply_args[@]}"}

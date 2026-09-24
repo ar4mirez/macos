@@ -36,8 +36,15 @@ say "This unlinks your dotfiles and removes the engine at $MACOS_ROOT."
 say "Apps, macOS settings, ~/.dotfiles and $MACOS_STATE (with backups) stay."
 dry_run || confirm "Uninstall?" || { skip "nothing changed"; exit 0; }
 
+dry_run || log_to_file
+
 step "Dotfiles"
+linked_paths=""
 if [ -n "${MACOS_PROFILE:-}" ] && [ -d "$MACOS_DOTFILES/macos/profiles/base" ] && command -v stow >/dev/null 2>&1; then
+  for p in $(stow_packages); do
+    [ -d "$MACOS_DOTFILES/$p" ] && linked_paths="$linked_paths
+$(package_files "$p")"
+  done
   dotfiles_unlink
 else
   skip "no linked dotfiles to remove"
@@ -54,7 +61,11 @@ done
 if [ -d "$HOME/.config/git/identity.d" ]; then
   run rm -rf "$HOME/.config/git/identity.d"
 fi
-dotfiles_restore_backups
+dotfiles_restore_backups "$linked_paths"
+# Without the ssh config and agent link, gh over ssh would fail.
+if command -v gh >/dev/null 2>&1 && [ "$(gh config get git_protocol -h github.com 2>/dev/null)" = ssh ]; then
+  run gh config set git_protocol https -h github.com
+fi
 
 step "Engine"
 if engine_cli_linked; then

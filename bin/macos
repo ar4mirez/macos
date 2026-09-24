@@ -74,12 +74,14 @@ if [ ! -f "$script" ]; then
   exit 127
 fi
 
-case "${1:-}" in
-  -h | --help)
-    printf '%s\n\nUsage: %s\n' "$(meta "$script" summary)" "$(meta "$script" usage)"
-    exit 0
-    ;;
-esac
+for _arg in "$@"; do
+  case "$_arg" in
+    -h | --help)
+      printf '%s\n\nUsage: %s\n' "$(meta "$script" summary)" "$(meta "$script" usage)"
+      exit 0
+      ;;
+  esac
+done
 
 if [ "$(meta "$script" bash)" = 3 ]; then
   exec /bin/bash "$script" "$@"

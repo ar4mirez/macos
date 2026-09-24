@@ -28,9 +28,15 @@ stow_packages() {
 }
 
 # package_files <package> — files a package would link, relative to $HOME.
+# Mirrors what stow skips: its built-in ignore list (VCS dirs and files,
+# editor backups, top-level README*/LICENSE*/COPYING) plus our .DS_Store.
 package_files() {
-  (cd "$MACOS_DOTFILES/$1" && find . \( -type f -o -type l \) \
-    ! -name .DS_Store ! -path './README*' ! -path './LICENSE*' ! -name .stow-local-ignore |
+  (cd "$MACOS_DOTFILES/$1" && find . \
+    \( -name .git -o -name CVS -o -name RCS -o -name .svn -o -name _darcs -o -name .hg \) -prune -o \
+    \( -type f -o -type l \) \
+    ! -name .DS_Store ! -name .gitignore ! -name .gitmodules ! -name .cvsignore ! -name .stow-local-ignore \
+    ! -name '*~' ! -name '#*#' ! -name '.#*' ! -name '*,v' \
+    ! -path './README*' ! -path './LICENSE*' ! -path './COPYING' -print |
     sed 's#^\./##' | sort)
 }
 
@@ -71,7 +77,11 @@ dotfiles_backup_conflicts() {
   for p in "$@"; do
     while IFS= read -r rel; do
       [ "$(link_state "$p" "$rel")" = conflict ] || continue
-      [ -n "$backup" ] || backup="$MACOS_STATE/backup/$(date +%Y%m%d-%H%M%S)"
+      if [ -z "$backup" ]; then
+        backup="$MACOS_STATE/backup/$(date +%Y%m%d-%H%M%S)"
+        run mkdir -p "$MACOS_STATE/backup"
+        run chmod 700 "$MACOS_STATE/backup"
+      fi
       dest="$backup/$rel"
       run mkdir -p "$(dirname "$dest")"
       run mv "$HOME/$rel" "$dest"
@@ -94,12 +104,14 @@ EOF
 # the oldest engine backup that has them, where nothing is there now.
 # Only engine-made backup dirs (<yyyymmdd-hhmmss>) are used, so files you
 # moved aside yourself (e.g. a retired key) stay put.
-dotfiles_restore_backups() {
-  local dir rel restored=0
+dotfiles_restore_backups() { # dotfiles_restore_backups <paths the packages linked>
+  local dir rel restored=0 allowed="$1"
   [ -d "$MACOS_STATE/backup" ] || return 0
   for dir in $(find "$MACOS_STATE/backup" -mindepth 1 -maxdepth 1 -type d | grep -E '/[0-9]{8}-[0-9]{6}$' | sort); do
     while IFS= read -r rel; do
       [ -n "$rel" ] || continue
+      # Only paths a dotfiles package owned; anything else is not ours to put back.
+      grep -qxF "$rel" <<<"$allowed" || continue
       if [ -e "$HOME/$rel" ] || [ -L "$HOME/$rel" ]; then
         continue
       fi

@@ -21,6 +21,8 @@ good() { OKS=$((OKS + 1)); printf '  %sok%s    %s\n' "$_C_GREEN" "$_C_RESET" "$*
 meh() { WARNS=$((WARNS + 1)); printf '  %swarn%s  %s\n' "$_C_YELLOW" "$_C_RESET" "$*"; }
 bad() { FAILS=$((FAILS + 1)); printf '  %sFAIL%s  %s\n' "$_C_RED" "$_C_RESET" "$*"; }
 section() { printf '\n%s\n' "$*"; }
+# words — join stdin lines into one space-separated list.
+words() { tr '\n' ' ' | sed 's/  */ /g; s/^ //; s/ $//'; }
 
 section "Engine"
 good "version $(cat "$MACOS_ROOT/version") at $MACOS_ROOT"
@@ -33,7 +35,7 @@ else
   meh "'macos' is not linked into ~/.local/bin (run 'macos update')"
 fi
 if [ -n "$(migrations_pending)" ]; then
-  meh "migrations pending: $(migrations_pending | tr '\n' ' ')(run 'macos update')"
+  meh "migrations pending: $(migrations_pending | words) (run 'macos update')"
 fi
 
 section "Profile"
@@ -48,7 +50,17 @@ section "Security"
 if fdesetup status 2>/dev/null | grep -q 'FileVault is On'; then good "FileVault on"; else bad "FileVault is off"; fi
 if csrutil status 2>/dev/null | grep -q 'enabled'; then good "System Integrity Protection on"; else meh "System Integrity Protection is not fully enabled"; fi
 if "$SOCKETFILTERFW" --getglobalstate 2>/dev/null | grep -q 'is enabled'; then good "firewall on"; else meh "firewall off ('macos bootstrap' turns it on)"; fi
+if "$SOCKETFILTERFW" --getstealthmode 2>/dev/null | grep -q 'mode is on'; then good "firewall stealth mode on"; else meh "firewall stealth mode off ('macos bootstrap' turns it on)"; fi
 if grep -q 'pam_tid.so' "$PAM_SUDO_LOCAL" 2>/dev/null; then good "Touch ID for sudo"; else meh "Touch ID for sudo not set up"; fi
+# Every module sudo_local names by path must exist (a missing one can break
+# sudo) and be root-owned (sudo runs it as root).
+for mod in $(awk '$1 == "auth" && $3 ~ /^\// { print $3 }' "$PAM_SUDO_LOCAL" 2>/dev/null); do
+  if [ ! -e "$mod" ]; then
+    bad "sudo_local loads $mod, which is missing; sudo may break (run 'macos apply' from a terminal)"
+  elif [ "$(stat -L -f %Su "$mod")" != root ] || [ "$(stat -f %Su "$(dirname "$mod")")" != root ]; then
+    meh "sudo_local loads $mod from a user-writable place; run 'macos apply' from a terminal to switch to a root-owned copy"
+  fi
+done
 
 section "Apps"
 brewfile="$(mktemp "${TMPDIR:-/tmp}/macos-doctor.XXXXXX")"
@@ -56,14 +68,17 @@ on_exit "rm -f '$brewfile'"
 # shellcheck disable=SC2046
 brew_merge "$brewfile" $(profile_brewfiles "$MACOS_PROFILE")
 missing="$(brew_missing "$brewfile")"
+if ! grep -q '^mas ' <<<"$missing"; then
+  pending_done appstore
+fi
 if [ -z "$missing" ]; then
   good "every declared app is installed ($(grep -cE '^(brew|cask|mas) ' "$brewfile") entries)"
 else
-  bad "declared but not installed: $(printf '%s' "$missing" | awk '{ print $2 }' | tr '\n' ' ')(run 'macos apply')"
+  bad "declared but not installed: $(cut -d' ' -f2- <<<"$missing" | words) (run 'macos apply')"
 fi
 undeclared="$(env "${BREW_CLEANUP_ENV[@]}" brew bundle cleanup --file="$brewfile" </dev/null 2>/dev/null | grep -vE '^(Would|Run )' || true)"
 if [ -n "$undeclared" ]; then
-  meh "installed but undeclared: $(printf '%s' "$undeclared" | tr '\n' ' ')('macos apps adopt' or 'macos apply --prune')"
+  meh "installed but undeclared: $(words <<<"$undeclared") ('macos apps adopt' or 'macos apply --prune')"
 fi
 if brew list --cask claude-code >/dev/null 2>&1; then
   bad "the claude-code cask is installed; it shadows the native Claude Code in ~/.local/bin"
@@ -76,7 +91,7 @@ for dir in $MACOS_APPLICATIONS_DIRS; do
     [ -n "$exe" ] && [ -f "$app/Contents/MacOS/$exe" ] || continue
     # lipo fails on non-Mach-O launchers (scripts): nothing to judge there.
     archs="$(lipo -archs "$app/Contents/MacOS/$exe" 2>/dev/null || true)"
-    if [ -n "$archs" ] && ! printf '%s' "$archs" | grep -q arm64; then
+    if [ -n "$archs" ] && ! grep -q arm64 <<<"$archs"; then
       x86="$x86 $(basename "$app" .app)"
     fi
   done
@@ -89,14 +104,18 @@ notlinked="$(printf '%s\n' "$status_out" | awk '$1 == "missing" || $1 == "confli
 if [ -z "$notlinked" ]; then
   good "all $(printf '%s\n' "$status_out" | grep -c '^  linked') dotfiles linked"
 else
-  bad "not linked: $(printf '%s' "$notlinked" | awk '{ print $2 }' | tr '\n' ' ')(run 'macos dotfiles link')"
+  bad "not linked: $(awk '{ print $2 }' <<<"$notlinked" | words) (run 'macos dotfiles link')"
 fi
-if printf '%s\n' "$status_out" | grep -q '^  dirty'; then
+if grep -q '^  dirty' <<<"$status_out"; then
   meh "$MACOS_DOTFILES has uncommitted changes"
 fi
 if [ -e "$HOME/.gitconfig" ]; then
   meh "a ~/.gitconfig exists; git reads it besides ~/.config/git/config (move it into config.local)"
 fi
+case ":$PATH:" in
+  *":$HOME/.local/bin:"*) good "PATH includes ~/.local/bin" ;;
+  *) meh "PATH lacks ~/.local/bin (open a new terminal; ~/.zprofile adds it)" ;;
+esac
 if [ -x "$HOME/.local/bin/claude" ]; then
   if [ "$(command -v claude)" = "$HOME/.local/bin/claude" ]; then
     good "claude resolves to ~/.local/bin/claude"
@@ -109,8 +128,16 @@ if command -v mise >/dev/null 2>&1; then
 fi
 
 section "Settings"
-drift="$( { defaults_check; system_check; } 2>/dev/null || true)"
-if [ -z "$drift" ]; then
+if ! conf_err="$( (defaults_lines >/dev/null) 2>&1)"; then
+  die_caught
+  bad "invalid defaults.conf: $(grep -v '^ *x ' <<<"$conf_err" | head -n 3 | words)"
+  drift=""
+else
+  drift="$( { defaults_check; system_check; } 2>/dev/null)" || true
+fi
+if [ -n "${conf_err:-}" ] && [ -z "$drift" ]; then
+  :
+elif [ -z "$drift" ]; then
   good "macOS settings match the declared defaults"
 else
   meh "$(printf '%s\n' "$drift" | grep -c 'drift') setting(s) differ ('macos defaults check' for details)"
@@ -123,7 +150,10 @@ if [ -x "$TAILSCALE_CLI" ] && "$TAILSCALE_CLI" status >/dev/null 2>&1; then
 fi
 
 section "Identity"
-orgs="$(orgs_lines 2>/dev/null || true)"
+orgs="$(orgs_lines 2>/dev/null)" || { die_caught; orgs=""; }
+if [ -n "$orgs" ]; then
+  identity_check_pending_uploads "$(orgs_resolve "$orgs" "$(identity_agent_list)" 2>/dev/null)"
+fi
 if [ -z "$orgs" ]; then
   meh "no identities in orgs.conf; git uses the stowed defaults"
 elif ! agent_ready; then

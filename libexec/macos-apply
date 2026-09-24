@@ -8,7 +8,7 @@
 
 # shellcheck source=lib/common.sh
 . "${MACOS_ROOT:=$(cd -- "$(dirname -- "$0")/.." && pwd -P)}/lib/common.sh"
-for _lib in run prompt lock pending sudo brew profile dotfiles defaults system identity; do
+for _lib in run prompt lock pending sudo security brew profile dotfiles defaults system identity; do
   # shellcheck source=/dev/null
   . "$MACOS_ROOT/lib/$_lib.sh"
 done
@@ -52,6 +52,18 @@ if [ "$prune" = 1 ]; then
   brew_prune "$MERGED_BREWFILE"
 fi
 
+step "Touch ID for sudo"
+if [ "$(touchid_state)" = ok ]; then
+  skip "Touch ID for sudo up to date"
+elif [ ! -f "$PAM_SUDO_LOCAL" ]; then
+  skip "Touch ID for sudo is not set up ('macos bootstrap' sets it up)"
+elif sudo_possible; then
+  sudo_keepalive
+  security_touchid
+else
+  warn "Touch ID for sudo needs updating; run 'macos apply' from a terminal (sudo needs your password)"
+fi
+
 step "Dotfiles"
 dotfiles_link
 
@@ -62,8 +74,8 @@ step "Defaults"
 defaults_apply
 system_apply
 
-# Never waits on 1Password here: without the agent this renders identities
-# and leaves signing pending (see `macos identity`).
+# Never waits on 1Password here. Without the agent it renders identities
+# (from the keys cached at the last verified run, if any).
 step "Identity"
 MACOS_YES=1 identity_apply
 

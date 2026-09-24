@@ -19,13 +19,17 @@ export HOME="$SANDBOX/home"
 export MACOS_STATE="$SANDBOX/state"
 export MACOS_DOTFILES="$SANDBOX/dotfiles"
 export STUB_LOG="$SANDBOX/stub.log"
+export TMPDIR="$SANDBOX/tmp"
+# A test that unexpectedly reaches a prompt must fail fast, not wait on the
+# real terminal forever; tests that answer prompts set MACOS_TTY themselves.
+export MACOS_TTY=/dev/null MACOS_SUDO_TTY=/dev/null
 export NO_COLOR=1
 # The user's shell exports XDG_* (and maybe GIT_CONFIG_*): real tools in the
 # tests (git, stow) must only ever see the sandbox HOME.
 unset XDG_STATE_HOME XDG_CONFIG_HOME XDG_DATA_HOME XDG_CACHE_HOME GIT_CONFIG_GLOBAL GIT_CONFIG_SYSTEM
 unset MACOS_PROFILE MACOS_BASH
 export GIT_CONFIG_NOSYSTEM=1
-mkdir -p "$HOME" "$SANDBOX/bin"
+mkdir -p "$HOME" "$SANDBOX/bin" "$SANDBOX/tmp"
 
 for t in $STUBBED_TOOLS; do
   ln -s "$ROOT/test/stubs/stub" "$SANDBOX/bin/$t"
@@ -57,6 +61,15 @@ for t in $STUBBED_TOOLS; do
     exit 1
   fi
 done
+
+# Runtime tripwire: the defaults fixtures declare a canary in a domain no
+# real app uses. If the real /usr/bin/defaults ever sees it, some code path
+# escaped the stub and wrote real preferences.
+TRIPWIRE_DOMAIN=com.ar4mirez.macos.test-tripwire
+if /usr/bin/defaults read "$TRIPWIRE_DOMAIN" Canary >/dev/null 2>&1; then
+  echo "FATAL: $TRIPWIRE_DOMAIN Canary exists in the real preferences (a test leaked); inspect, then: defaults delete $TRIPWIRE_DOMAIN Canary" >&2
+  exit 1
+fi
 
 pass=0
 fail=0
@@ -136,6 +149,13 @@ t_no_absolute_system_tools() {
 }
 check "no absolute paths to system tools outside lib/sys.sh" t_no_absolute_system_tools
 
+t_no_printf_grep_q() {
+  # `printf "$big" | grep -q` can die of SIGPIPE under pipefail once grep
+  # exits early; here-strings (grep -q ... <<<"$x") cannot.
+  ! grep -nE "printf [^|]*\| *grep -[a-zA-Z]*q" $ENGINE_SH | grep -v '^[^:]*test/run.sh:'
+}
+check "no printf | grep -q pipelines (use here-strings)" t_no_printf_grep_q
+
 t_sys_overridable() {
   (
     SOCKETFILTERFW="$SANDBOX/bin/sudo" ACTIVATE_SETTINGS="$SANDBOX/bin/sudo" OP_SSH_SIGN="$SANDBOX/bin/sudo"
@@ -189,6 +209,11 @@ t_metadata() {
   return "$rc"
 }
 check "every subcommand has summary, usage and +x" t_metadata
+
+t_help_anywhere() {
+  "$M" apps add something --cask --help >"$SANDBOX/o" 2>&1 && grep -q '^Usage: macos apps' "$SANDBOX/o"
+}
+check "--help works anywhere in the arguments" t_help_anywhere
 
 t_symlinked() {
   ln -s "$M" "$SANDBOX/bin/macos-link"
@@ -290,6 +315,22 @@ t_ok_marks_dry_run() {
   [ "$(MACOS_DRY_RUN=1 /bin/bash -c '. "$1/lib/log.sh"; ok installed x' _ "$ROOT" 2>&1)" = "  ~ installed x (dry run)" ]
 }
 check "ok lines are marked under --dry-run" t_ok_marks_dry_run
+
+t_die_in_subshell_single_message() {
+  local out
+  out="$(/bin/bash -c '. "$1/lib/common.sh"; f() { die "real reason"; }; x="$(f)"; echo "not reached"' _ "$ROOT" 2>&1)"
+  grep -q 'real reason' <<<"$out" && ! grep -q 'failed (exit' <<<"$out" && ! grep -q 'not reached' <<<"$out"
+}
+check "die inside \$(...) stops the run with only its own message" t_die_in_subshell_single_message
+
+t_log_rotation() {
+  mkdir -p "$MACOS_STATE/logs" && rm -f "$MACOS_STATE"/logs/*.log
+  for i in 1 2 3 4 5; do : >"$MACOS_STATE/logs/2020010$i-000000-old.log"; done
+  MACOS_LOG_KEEP=3 /bin/bash -c '. "$1/lib/common.sh"; log_to_file; say hi' _ "$ROOT" 2>/dev/null
+  sleep 0.2
+  [ "$(ls "$MACOS_STATE"/logs/*.log | wc -l | tr -d ' ')" -le 4 ] && [ ! -e "$MACOS_STATE/logs/20200101-000000-old.log" ]
+}
+check "old logs are rotated (MACOS_LOG_KEEP)" t_log_rotation
 
 t_exit_hooks() {
   /bin/bash -c '. "$1/lib/common.sh"; on_exit "touch $2/a"; on_exit "touch $2/b"; exit 3' _ "$ROOT" "$SANDBOX" >/dev/null 2>&1
@@ -549,15 +590,11 @@ check "bootstrap --dry-run changes nothing and shows the plan" t_bootstrap_dry_r
 t_bootstrap_sudo_preflight() {
   # No cached sudo and no terminal: stop before any step runs.
   bootstrap_env
-  STUB_SUDO_RC=1 "$M" bootstrap --yes --profile work --hostname x </dev/null >"$SANDBOX/o" 2>&1 && return 1
+  STUB_SUDO_RC=1 MACOS_SUDO_TTY=/nonexistent/tty "$M" bootstrap --yes --profile work --hostname x </dev/null >"$SANDBOX/o" 2>&1 && return 1
   grep -q 'no terminal to type the password in' "$SANDBOX/o" && ! grep -q '==> Profile' "$SANDBOX/o" &&
     [ ! -f "$MACOS_STATE/machine.env" ]
 }
-if (exec </dev/tty) 2>/dev/null; then
-  printf '  skip sudo preflight test (this shell has a terminal)\n'
-else
-  check "bootstrap stops before any change when sudo cannot prompt" t_bootstrap_sudo_preflight
-fi
+check "bootstrap stops before any change when sudo cannot prompt" t_bootstrap_sudo_preflight
 
 t_bootstrap_interactive() {
   bootstrap_env
@@ -799,6 +836,38 @@ t_adopt_interactive() {
 }
 check "apps adopt asks per package (base / profile / skip)" t_adopt_interactive
 
+t_adopt_undeclared_hand_installed() {
+  phase3_env
+  mkdir -p "$MACOS_DOTFILES/macos/profiles/personal" "$SANDBOX/cache/api/internal"
+  rm -rf "$SANDBOX/Applications" && mkdir -p "$SANDBOX/Applications/Obsidian.app" "$SANDBOX/Applications/Slack.app" "$SANDBOX/Applications/Pages.app/Contents"
+  touch "$SANDBOX/Applications/Pages.app/Contents/_MASReceipt"
+  local casks='{"obsidian@beta":{"raw_artifacts":[[":app",["Obsidian.app"]]]},"obsidian":{"raw_artifacts":[[":uninstall",{}],[":app",["Obsidian.app"]]]},"slack":{"raw_artifacts":[[":app",["Slack.app"]]]},"pages":{"raw_artifacts":[[":app",["Pages.app"]]]}}'
+  jq -n --arg p "$(jq -nc --argjson c "$casks" '{casks: $c}')" '{payload: $p, signatures: []}' >"$SANDBOX/cache/api/internal/packages.test.jws.json"
+  # After adopting, `brew bundle dump` lists obsidian too: it must not be
+  # declared a second time as a "stray".
+  STUB_BREW___CACHE_OUT="$SANDBOX/cache" STUB_BREW_LIST___CASK_OUT=slack MACOS_APPLICATIONS_DIRS="$SANDBOX/Applications" \
+    STUB_BREW_BUNDLE_DUMP_OUT="$(printf 'cask "obsidian"\ncask "slack"')" \
+    "$M" apps adopt --yes --profile work >"$SANDBOX/o" 2>&1 || { cat "$SANDBOX/o"; return 1; }
+  grep -q "^brew bundle add --file=$W --cask obsidian$" "$STUB_LOG" && grep -q '^brew install --cask --adopt obsidian$' "$STUB_LOG" &&
+    [ "$(grep -c 'bundle add .*obsidian' "$STUB_LOG")" -eq 1 ] &&
+    ! grep -qE 'obsidian@beta|--cask (slack|pages)' "$STUB_LOG" || { cat "$STUB_LOG"; return 1; }
+}
+check "apps adopt finds undeclared hand-installed apps via Homebrew's cask catalog" t_adopt_undeclared_hand_installed
+
+t_adopt_ambiguous_and_inactive_profile() {
+  phase3_env
+  mkdir -p "$MACOS_DOTFILES/macos/profiles/personal" "$SANDBOX/cache/api/internal"
+  rm -rf "$SANDBOX/Applications" && mkdir -p "$SANDBOX/Applications/Caffeine.app"
+  local casks='{"caffeine":{"raw_artifacts":[[":app",["Caffeine.app"]]]},"domzilla-caffeine":{"raw_artifacts":[[":app",["Caffeine.app"]]]}}'
+  jq -n --arg p "$(jq -nc --argjson c "$casks" '{casks: $c}')" '{payload: $p}' >"$SANDBOX/cache/api/internal/packages.test.jws.json"
+  STUB_BREW___CACHE_OUT="$SANDBOX/cache" MACOS_APPLICATIONS_DIRS="$SANDBOX/Applications" \
+    "$M" apps adopt --yes --profile work >"$SANDBOX/o" 2>&1 || { cat "$SANDBOX/o"; return 1; }
+  grep -q 'matches several casks (caffeine domzilla-caffeine)' "$SANDBOX/o" && ! grep -q 'bundle add' "$STUB_LOG" || { cat "$SANDBOX/o"; return 1; }
+  "$M" apps adopt --yes --profile personal >"$SANDBOX/o" 2>&1 && return 1
+  grep -q -- '--profile must be one it uses' "$SANDBOX/o"
+}
+check "apps adopt never guesses between casks, and only adopts into this Mac's profiles" t_adopt_ambiguous_and_inactive_profile
+
 t_adopt_hand_installed() {
   phase3_env
   mkdir -p "$SANDBOX/Applications/Slack.app"
@@ -944,6 +1013,7 @@ com.apple.dock                    | autohide-delay              | float  | 0
 com.apple.screencapture           | location                    | string | ~/Screenshots
 @currentHost:-g                   | com.apple.mouse.tapBehavior | int    | 1
 com.apple.AppleMultitouchTrackpad | Clicking                    | int    | 1
+com.ar4mirez.macos.test-tripwire  | Canary                      | int    | 1
 CONF
   printf 'com.apple.dock | autohide | bool | no\n' >"$MACOS_DOTFILES/macos/profiles/work/defaults.conf"
 }
@@ -1016,6 +1086,14 @@ t_defaults_dry_run() {
 }
 check "defaults apply --dry-run writes nothing" t_defaults_dry_run
 
+t_defaults_invalid_values() {
+  defaults_env
+  printf -- '-g | X | bool | maybe\n-g | Y | integer | 2\n' >>"$MACOS_DOTFILES/macos/profiles/base/defaults.conf"
+  "$M" defaults apply >"$SANDBOX/o" 2>&1 && return 1
+  grep -q 'not a bool: maybe' "$SANDBOX/o" && grep -q 'unknown type integer' "$SANDBOX/o" && ! grep -q 'defaults write' "$STUB_LOG"
+}
+check "defaults.conf types and values are validated before anything is written" t_defaults_invalid_values
+
 t_defaults_invalid_line() {
   defaults_env
   printf 'com.apple.dock | orphan\n' >>"$MACOS_DOTFILES/macos/profiles/base/defaults.conf"
@@ -1068,7 +1146,7 @@ t_capslock() {
     grep -q 'hidutil property --set {"UserKeyMapping":\[{"HIDKeyboardModifierMappingSrc":0x700000039,"HIDKeyboardModifierMappingDst":0x700000029}\]}' "$STUB_LOG" ||
     { cat "$STUB_LOG"; return 1; }
   : >"$STUB_LOG"
-  STUB_HIDUTIL_OUT="HIDKeyboardModifierMappingDst = 30064771113" "$M" defaults apply >"$SANDBOX/o" 2>&1
+  STUB_HIDUTIL_OUT="HIDKeyboardModifierMappingDst = 30064771113; HIDKeyboardModifierMappingSrc = 30064771129" "$M" defaults apply >"$SANDBOX/o" 2>&1
   ! grep -q 'hidutil property --set' "$STUB_LOG" || return 1
   printf 'capslock = none\n' >"$MACOS_DOTFILES/macos/profiles/work/system.conf"
   "$M" defaults apply >/dev/null 2>&1
@@ -1193,8 +1271,8 @@ check "with the agent: signing on, ssh linked, keys uploaded, gh switched to ssh
 t_identity_idempotent() {
   identity_env; agent_up
   STUB_GH_API_USER_OUT=ar4mirez "$M" identity --yes >/dev/null 2>&1; : >"$STUB_LOG"
-  STUB_GH_API_USER_OUT=ar4mirez STUB_GH_API_USER_KEYS_OUT="$(printf '%s\n%s' "$KEY_DEF" "$KEY_WORK")" \
-    STUB_GH_API_USER_SSH_SIGNING_KEYS_OUT="$(printf '%s\n%s' "$KEY_DEF" "$KEY_WORK")" STUB_GH_CONFIG_GET_OUT=ssh \
+  STUB_GH_API_USER_OUT=ar4mirez STUB_GH_API___PAGINATE_USER_KEYS_OUT="$(printf '%s\n%s' "$KEY_DEF" "$KEY_WORK")" \
+    STUB_GH_API___PAGINATE_USER_SSH_SIGNING_KEYS_OUT="$(printf '%s\n%s' "$KEY_DEF" "$KEY_WORK")" STUB_GH_CONFIG_GET_OUT=ssh \
     "$M" identity --yes >"$SANDBOX/o" 2>&1 || { cat "$SANDBOX/o"; return 1; }
   grep -q 'already up to date' "$SANDBOX/o" && ! grep -qE 'ssh-key add|config set' "$STUB_LOG"
 }
@@ -1306,7 +1384,7 @@ t_identity_keeps_verified_setup() {
   cp "$IG" "$SANDBOX/ig.before"
   agent_down
   "$M" apply </dev/null >"$SANDBOX/o" 2>&1 || { cat "$SANDBOX/o"; return 1; }
-  cmp -s "$IG" "$SANDBOX/ig.before" && grep -q 'gpgsign = true' "$IG" && grep -q 'keeping the verified identity setup' "$SANDBOX/o"
+  cmp -s "$IG" "$SANDBOX/ig.before" && grep -q 'gpgsign = true' "$IG" && grep -q 'using the keys it served at the last verified run' "$SANDBOX/o"
 }
 check "apply with 1Password closed keeps a verified signing setup" t_identity_keeps_verified_setup
 
@@ -1317,6 +1395,62 @@ t_identity_no_alias_without_key() {
   ! grep -q insteadOf "$HOME/.config/git/identity.d/cuemby.gitconfig" && ! grep -q 'github.com-cuemby' "$HOME/.ssh/config.d/macos-identity"
 }
 check "no url rewrite for a second account whose key is unresolved (no alias exists)" t_identity_no_alias_without_key
+
+t_identity_verified_without_ssh_package() {
+  identity_env; agent_up
+  STUB_GH_API_USER_OUT=ar4mirez "$M" identity --yes >/dev/null 2>&1
+  rm -rf "$MACOS_DOTFILES/ssh"
+  "$M" dotfiles status >"$SANDBOX/o" 2>&1; "$M" apply </dev/null >"$SANDBOX/o2" 2>&1 || { cat "$SANDBOX/o2"; return 1; }
+}
+check "a verified identity without an ssh package does not break linking" t_identity_verified_without_ssh_package
+
+t_identity_interactive_decline_keeps_signing() {
+  identity_env; agent_up
+  STUB_GH_API_USER_OUT=ar4mirez "$M" identity --yes >/dev/null 2>&1
+  cp "$IG" "$SANDBOX/ig.before"
+  agent_down; printf 'n\n' >"$SANDBOX/answers"
+  MACOS_TTY="$SANDBOX/answers" "$M" identity >"$SANDBOX/o" 2>&1 || { cat "$SANDBOX/o"; return 1; }
+  cmp -s "$IG" "$SANDBOX/ig.before" && grep -q 'IdentityFile ~/.ssh/macos-default.pub' "$HOME/.ssh/config.d/macos-identity" || { diff "$SANDBOX/ig.before" "$IG"; return 1; }
+}
+check "declining the 1Password prompt on a verified Mac keeps signing and ssh pins" t_identity_interactive_decline_keeps_signing
+
+t_identity_orgs_change_while_closed() {
+  identity_env; agent_up
+  STUB_GH_API_USER_OUT=ar4mirez "$M" identity --yes >/dev/null 2>&1
+  agent_down
+  printf 'extra | ~/Work/Extra | me@extra.dev | ar4mirez | %s\n' "$KEY_WORK" >>"$MACOS_DOTFILES/macos/orgs.conf"
+  "$M" apply </dev/null >"$SANDBOX/o" 2>&1 || { cat "$SANDBOX/o"; return 1; }
+  grep -q 'email = me@extra.dev' "$HOME/.config/git/identity.d/extra.gitconfig" &&
+    grep -q 'gpgsign = true' "$HOME/.config/git/identity.d/extra.gitconfig" && grep -q 'gpgsign = true' "$IG" &&
+    ! grep -q '^1password|' "$MACOS_STATE/pending" 2>/dev/null
+}
+check "orgs.conf changes apply while 1Password is closed (cached keys; no pending nag)" t_identity_orgs_change_while_closed
+
+t_identity_listing_failure_warns() {
+  identity_env; agent_up
+  STUB_GH_API_USER_OUT=ar4mirez STUB_GH_API___PAGINATE_RC=1 "$M" identity --yes >"$SANDBOX/o" 2>&1 || { cat "$SANDBOX/o"; return 1; }
+  grep -q "couldn't list your GitHub keys" "$SANDBOX/o" && ! grep -q 'ssh-key add' "$STUB_LOG" &&
+    grep -q '^gh config set git_protocol ssh' "$STUB_LOG"
+}
+check "a failed GitHub key listing is a warning, not a crash" t_identity_listing_failure_warns
+
+t_identity_upload_failure_warns() {
+  identity_env; agent_up
+  STUB_GH_API_USER_OUT=ar4mirez STUB_GH_SSH_KEY_RC=1 "$M" identity --yes >"$SANDBOX/o" 2>&1 || { cat "$SANDBOX/o"; return 1; }
+  grep -q 'could not upload the default key for authentication' "$SANDBOX/o" && grep -q '^gh config set git_protocol ssh' "$STUB_LOG"
+}
+check "a failed key upload is a warning, and the rest still runs" t_identity_upload_failure_warns
+
+t_identity_other_account_pending_clears() {
+  identity_env; agent_up
+  sed -i '' "s#| angel@cuemby.com | ar4mirez |#| angel@cuemby.com | angel-cuemby |#" "$MACOS_DOTFILES/macos/orgs.conf"
+  STUB_GH_API_USER_OUT=ar4mirez "$M" identity --yes >/dev/null 2>&1
+  grep -q '^github-keys-cuemby|' "$MACOS_STATE/pending" || return 1
+  STUB_GH_API_USER_OUT=ar4mirez STUB_GH_API___PAGINATE_USERS_ANGEL_CUEMBY_KEYS_OUT="$KEY_WORK" \
+    STUB_GH_API___PAGINATE_USERS_ANGEL_CUEMBY_SSH_SIGNING_KEYS_OUT="$KEY_WORK" "$M" identity --yes >"$SANDBOX/o" 2>&1
+  ! grep -q '^github-keys-cuemby|' "$MACOS_STATE/pending"
+}
+check "a second account's key-upload step clears once GitHub lists the key" t_identity_other_account_pending_clears
 
 t_apply_never_waits_for_agent() {
   identity_env; agent_down
@@ -1425,7 +1559,8 @@ t_bootstrap_rerun_runs_migrations() {
   bootstrap_env
   rm -rf "$MACOS_MIGRATIONS_DIR" && mkdir -p "$MACOS_MIGRATIONS_DIR" && printf 'touch "%s/ran"\n' "$SANDBOX" >"$MACOS_MIGRATIONS_DIR/100.sh"
   rm -f "$SANDBOX/ran"
-  mkdir -p "$MACOS_STATE" && printf 'MACOS_PROFILE="work"\n' >"$MACOS_STATE/machine.env"   # set up before: not fresh
+  mkdir -p "$MACOS_STATE" && printf 'MACOS_PROFILE="work"\n' >"$MACOS_STATE/machine.env"
+  date >"$MACOS_STATE/bootstrapped"   # a bootstrap finished here before: not fresh
   STUB_GH_OUT="  - Token scopes: 'admin:public_key', 'admin:ssh_signing_key'" \
     "$M" bootstrap --yes --profile work --hostname x >"$SANDBOX/o" 2>&1 || { cat "$SANDBOX/o"; return 1; }
   [ -f "$SANDBOX/ran" ] && [ -f "$MACOS_STATE/migrations/100" ]
@@ -1451,17 +1586,19 @@ check "a failed brew install still converges dotfiles and defaults, then exits n
 section "uninstall"
 
 t_uninstall() {
-  dotfiles_env
+  dotfiles_env; : >"$STUB_LOG"
   local copy="$SANDBOX/engine-copy"
   rm -rf "$copy" && cp -R "$ROOT" "$copy" && copy="$(cd "$copy" && pwd -P)"
   "$copy/bin/macos" dotfiles link >/dev/null 2>&1
   mkdir -p "$HOME/.local/bin" && ln -sfn "$copy/bin/macos" "$HOME/.local/bin/macos"
   mkdir -p "$MACOS_STATE/backup/20260101-000000" "$MACOS_STATE/backup/20260101-000000-retired-key/.ssh"
   echo original >"$MACOS_STATE/backup/20260101-000000/.zshrc"
+  echo 'auth sufficient pam_tid.so' >"$MACOS_STATE/backup/20260101-000000/sudo_local"   # not a dotfile path
   echo secret >"$MACOS_STATE/backup/20260101-000000-retired-key/.ssh/id_ed25519"
   mkdir -p "$HOME/.config/git/identity.d" "$HOME/.ssh/config.d"
   touch "$HOME/.config/git/identity.gitconfig" "$HOME/.config/git/identity.d/x.gitconfig" "$HOME/.ssh/config.d/macos-identity" "$HOME/.ssh/macos-default.pub"
-  "$copy/bin/macos" uninstall --yes >"$SANDBOX/o" 2>&1 || { cat "$SANDBOX/o"; return 1; }
+  STUB_GH_CONFIG_GET_OUT=ssh "$copy/bin/macos" uninstall --yes >"$SANDBOX/o" 2>&1 || { cat "$SANDBOX/o"; return 1; }
+  [ ! -e "$HOME/sudo_local" ] && grep -q '^gh config set git_protocol https' "$STUB_LOG" &&
   [ ! -e "$copy" ] && [ ! -L "$HOME/.local/bin/macos" ] && [ -f "$MACOS_DOTFILES/zsh/.zshrc" ] &&
     [ ! -L "$HOME/.zshrc" ] && [ "$(cat "$HOME/.zshrc")" = original ] &&
     [ ! -e "$HOME/.ssh/id_ed25519" ] &&
@@ -1567,7 +1704,10 @@ check "doctor verifies commit signing: signer present and key in the agent" t_do
 
 t_logs_private() {
   dotfiles_env
+  mkdir -p "$MACOS_STATE/logs" && chmod 755 "$MACOS_STATE/logs"
+  : >"$MACOS_STATE/logs/20200101-000000-old.log" && chmod 644 "$MACOS_STATE/logs/20200101-000000-old.log"
   "$M" apply >/dev/null 2>&1
+  [ "$(stat -f %Lp "$MACOS_STATE/logs/20200101-000000-old.log")" = 600 ] || { echo "old log not tightened"; return 1; }
   [ "$(stat -f %Lp "$(ls "$MACOS_STATE"/logs/*apply.log | head -1)")" = 600 ] && [ "$(stat -f %Lp "$MACOS_STATE/logs")" = 700 ]
 }
 check "log files are private (0600 in a 0700 dir)" t_logs_private
@@ -1579,12 +1719,131 @@ t_flags_without_action() {
 }
 check "commands with a default action accept options alone (macos defaults --dry-run)" t_flags_without_action
 
+t_doctor_undeclared() {
+  doctor_env
+  ( STUB_BREW_BUNDLE_CLEANUP_RC=1 STUB_BREW_BUNDLE_CLEANUP_OUT="$(printf 'Would uninstall formulae:\njq\nsl\nRun `brew bundle cleanup --force` to make these changes.')" \
+      "$M" doctor >"$SANDBOX/o" 2>&1 )
+  grep -q "warn  installed but undeclared: jq sl ('macos apps adopt'" "$SANDBOX/o" || { cat "$SANDBOX/o"; return 1; }
+}
+check "doctor lists undeclared installs from real cleanup output" t_doctor_undeclared
+
 t_doctor_no_profile() {
   phase3_env; rm -f "$MACOS_STATE/machine.env"
   ( "$M" doctor >"$SANDBOX/o" 2>&1 ) && return 1
   grep -q "FAIL  no profile" "$SANDBOX/o"
 }
 check "doctor fails clearly before bootstrap" t_doctor_no_profile
+
+# ---------------------------------------------------------------------------
+section "review 2 regressions"
+
+t_doctor_invalid_defaults_conf() {
+  doctor_env
+  printf 'com.apple.dock | tilesize | int | big\n' >>"$MACOS_DOTFILES/macos/profiles/base/defaults.conf" 2>/dev/null ||
+    printf 'com.apple.dock | tilesize | int | big\n' >"$MACOS_DOTFILES/macos/profiles/base/defaults.conf"
+  ( "$M" doctor >"$SANDBOX/o" 2>&1 ) && return 1
+  grep -q 'FAIL  invalid defaults.conf' "$SANDBOX/o" && grep -qE '[0-9]+ ok, [0-9]+ warnings, [0-9]+ failures' "$SANDBOX/o" &&
+    grep -q '^Manual steps' "$SANDBOX/o" || { cat "$SANDBOX/o"; return 1; }
+}
+check "doctor reports an invalid defaults.conf and still finishes its report" t_doctor_invalid_defaults_conf
+
+t_doctor_clears_appstore() {
+  doctor_env
+  printf 'appstore|Sign in to the App Store\n' >"$MACOS_STATE/pending"
+  ( "$M" doctor >"$SANDBOX/o" 2>&1 )
+  ! grep -q '^appstore|' "$MACOS_STATE/pending"
+}
+check "doctor clears the App Store step once nothing declared is missing" t_doctor_clears_appstore
+
+t_reattach_root_owned() {
+  mkdir -p "$HOMEBREW_PREFIX/lib/pam" && printf 'module\n' >"$HOMEBREW_PREFIX/lib/pam/pam_reattach.so"
+  : >"$STUB_LOG"
+  local dest="$SANDBOX/usrlocal/pam_reattach.so"
+  PAM_REATTACH_DEST="$dest" /bin/bash -c '. "$1/lib/common.sh"; . "$1/lib/run.sh"; . "$1/lib/security.sh"; touchid_render; security_touchid' _ "$ROOT" >"$SANDBOX/o" 2>/dev/null
+  rm -rf "${HOMEBREW_PREFIX:?}/lib"
+  grep -q "auth       optional       $dest" "$SANDBOX/o" && ! grep -q "$HOMEBREW_PREFIX/lib/pam" "$SANDBOX/o" &&
+    grep -q "^sudo install -o root -g wheel -m 444 $HOMEBREW_PREFIX/lib/pam/pam_reattach.so $dest" "$STUB_LOG" || { cat "$SANDBOX/o" "$STUB_LOG"; return 1; }
+}
+check "sudo_local loads a root-owned copy of pam_reattach, never the Homebrew one" t_reattach_root_owned
+
+t_apply_migrates_touchid() {
+  dotfiles_env
+  printf 'auth       optional       /opt/homebrew/lib/pam/pam_reattach.so\nauth       sufficient     pam_tid.so\n' >"$PAM_SUDO_LOCAL"
+  "$M" apply >"$SANDBOX/o" 2>&1 || { cat "$SANDBOX/o"; return 1; }
+  grep -q "^sudo tee $PAM_SUDO_LOCAL" "$STUB_LOG" && grep -q 'Touch ID for sudo' "$SANDBOX/o"
+}
+check "apply brings an outdated sudo_local up to date when sudo is available" t_apply_migrates_touchid
+
+t_doctor_flags_user_writable_module() {
+  doctor_env
+  mkdir -p "$SANDBOX/userpam" && : >"$SANDBOX/userpam/pam_reattach.so"
+  printf 'auth       optional       %s\nauth       optional       %s\nauth       sufficient     pam_tid.so\n' "$SANDBOX/userpam/pam_reattach.so" "$SANDBOX/missing/x.so" >"$PAM_SUDO_LOCAL"
+  ( "$M" doctor >"$SANDBOX/o" 2>&1 ) && return 1
+  grep -q "warn  sudo_local loads $SANDBOX/userpam/pam_reattach.so from a user-writable place" "$SANDBOX/o" &&
+    grep -q "FAIL  sudo_local loads $SANDBOX/missing/x.so, which is missing" "$SANDBOX/o" || { cat "$SANDBOX/o"; return 1; }
+}
+check "doctor flags a user-writable or missing PAM module in sudo_local" t_doctor_flags_user_writable_module
+
+t_defaults_numbers_exact() {
+  defaults_env
+  printf -- '-g | A | int | 010\n' >>"$MACOS_DOTFILES/macos/profiles/base/defaults.conf"
+  "$M" defaults apply >"$SANDBOX/o" 2>&1 && return 1
+  grep -q 'not an int: 010' "$SANDBOX/o" || return 1
+  defaults_env
+  printf -- '-g | F | float | 1234567.5\n' >>"$MACOS_DOTFILES/macos/profiles/base/defaults.conf"
+  "$M" defaults apply >/dev/null 2>&1
+  grep -q '^defaults write -g F -float 1234567.5$' "$STUB_LOG"
+}
+check "defaults ints reject leading zeros (octal); floats are written exactly" t_defaults_numbers_exact
+
+
+
+t_lock_waits_for_pid() {
+  mkdir -p "$MACOS_STATE/locks" && rm -rf "$MACOS_STATE/locks/race.lock"
+  sleep 30 &
+  local holder=$!
+  mkdir "$MACOS_STATE/locks/race.lock"
+  ( sleep 0.5; echo "$holder" >"$MACOS_STATE/locks/race.lock/pid" ) &
+  /bin/bash -c "$LOCKRUN" _ "$ROOT" >/dev/null 2>&1 <<<'' || true
+  local rc=0
+  /bin/bash -c '. "$1/lib/common.sh"; . "$1/lib/lock.sh"; lock_acquire race' _ "$ROOT" >"$SANDBOX/o" 2>&1 || rc=$?
+  kill "$holder" 2>/dev/null; wait "$holder" 2>/dev/null
+  [ "$rc" -ne 0 ] && grep -q 'in progress' "$SANDBOX/o" && [ -d "$MACOS_STATE/locks/race.lock" ]
+}
+check "a lock whose pid is not written yet is waited for, not stolen" t_lock_waits_for_pid
+
+t_package_files_stow_ignores() {
+  dotfiles_env
+  printf 'x\n' >"$MACOS_DOTFILES/zsh/.zshrc~"; printf 'x\n' >"$MACOS_DOTFILES/zsh/.gitignore"; printf 'x\n' >"$MACOS_DOTFILES/zsh/#tmp#"
+  "$M" dotfiles link >/dev/null 2>&1
+  "$M" dotfiles status >"$SANDBOX/o" 2>&1 || { cat "$SANDBOX/o"; return 1; }
+  ! grep -qE 'zshrc~|gitignore|#tmp#' "$SANDBOX/o"
+}
+check "files stow ignores (editor backups, .gitignore) are not reported missing" t_package_files_stow_ignores
+
+t_missing_taps_and_mas_names() {
+  doctor_env
+  ( STUB_BREW_BUNDLE_CHECK_RC=1 STUB_BREW_BUNDLE_CHECK_OUT="$(printf '→ Tap someone/tools needs to be tapped.\n→ Mas Final Cut Pro needs to be installed or updated.')" \
+      "$M" doctor >"$SANDBOX/o" 2>&1 ) && return 1
+  grep -q 'FAIL  declared but not installed: someone/tools Final Cut Pro ' "$SANDBOX/o" || { cat "$SANDBOX/o"; return 1; }
+}
+check "doctor sees missing taps and multi-word App Store names" t_missing_taps_and_mas_names
+
+t_remove_mas_with_spaces() {
+  phase3_env
+  printf 'mas "Final Cut Pro", id: 424389933\n' >>"$W"
+  "$M" apps remove "Final Cut Pro" --yes >"$SANDBOX/o" 2>&1 || { cat "$SANDBOX/o"; return 1; }
+  grep -q "^brew bundle remove --file=$W --mas Final Cut Pro" "$STUB_LOG"
+}
+check "apps remove finds App Store entries whose names have spaces" t_remove_mas_with_spaces
+
+t_update_leaks_no_temp_files() {
+  migrations_env
+  local before; before="$(find "$TMPDIR" -maxdepth 1 -name 'macos-died.*' | wc -l)"
+  "$M" update --yes >/dev/null 2>&1
+  [ "$(find "$TMPDIR" -maxdepth 1 -name 'macos-died.*' | wc -l)" -le "$before" ]
+}
+check "update's hand-over to apply leaves no temp files behind" t_update_leaks_no_temp_files
 
 # ---------------------------------------------------------------------------
 section "boot.sh"
@@ -1609,6 +1868,57 @@ t_boot_hands_over() {
 }
 check "boot.sh updates the engine and hands args to macos bootstrap" t_boot_hands_over
 
+boot_engine_fixture() {
+  local root="$1"
+  rm -rf "$root"; mkdir -p "$root/.git" "$root/bin"
+  printf '#!/bin/bash\necho "macos $*" >>"$STUB_LOG"\n' >"$root/bin/macos"; chmod +x "$root/bin/macos"
+  : >"$STUB_LOG"; rm -f "$STUB_LOG".seq.*; : >"$SANDBOX/tty"
+}
+
+t_boot_waits_for_clt() {
+  boot_engine_fixture "$SANDBOX/engine3"
+  STUB_XCODE_SELECT_RC_SEQ="1 1 1 0" MACOS_CLT_POLL=0 MACOS_ROOT="$SANDBOX/engine3" MACOS_TTY="$SANDBOX/tty" \
+    /bin/bash "$BOOT" >"$SANDBOX/o" 2>&1 || { cat "$SANDBOX/o"; return 1; }
+  grep -q '^xcode-select --install' "$STUB_LOG" && [ "$(grep -c '^xcode-select -p' "$STUB_LOG")" -eq 3 ] &&
+    grep -qx 'macos bootstrap' "$STUB_LOG"
+}
+check "boot.sh starts the CLT installer and waits until it is done" t_boot_waits_for_clt
+
+t_boot_clt_timeout() {
+  boot_engine_fixture "$SANDBOX/engine4"
+  STUB_XCODE_SELECT_RC=1 MACOS_CLT_POLL=1 MACOS_CLT_TIMEOUT=2 MACOS_ROOT="$SANDBOX/engine4" MACOS_TTY="$SANDBOX/tty" \
+    /bin/bash "$BOOT" >"$SANDBOX/o" 2>&1 && return 1
+  grep -q 'did not finish installing' "$SANDBOX/o" && ! grep -q '^macos bootstrap' "$STUB_LOG"
+}
+check "boot.sh gives up on the CLT after its timeout" t_boot_clt_timeout
+
+t_boot_installs_homebrew() {
+  boot_engine_fixture "$SANDBOX/engine5"
+  local prefix="$SANDBOX/newbrew"
+  rm -rf "$prefix"
+  # The fake installer lays down a brew (a stub) like the real one would.
+  STUB_CURL_OUT="mkdir -p '$prefix/bin' && ln -s '$ROOT/test/stubs/stub' '$prefix/bin/brew'" \
+    HOMEBREW_PREFIX="$prefix" MACOS_ROOT="$SANDBOX/engine5" MACOS_TTY="$SANDBOX/tty" /bin/bash "$BOOT" >"$SANDBOX/o" 2>&1 || { cat "$SANDBOX/o"; return 1; }
+  grep -q '^sudo -v' "$STUB_LOG" && grep -q '^curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh' "$STUB_LOG" &&
+    [ -x "$prefix/bin/brew" ] && grep -q '^brew shellenv' "$STUB_LOG"
+}
+check "boot.sh installs Homebrew when it is missing" t_boot_installs_homebrew
+
+t_boot_switches_ref() {
+  boot_engine_fixture "$SANDBOX/engine6"
+  STUB_GIT_OUT=main MACOS_REF=testing MACOS_ROOT="$SANDBOX/engine6" MACOS_TTY="$SANDBOX/tty" /bin/bash "$BOOT" >"$SANDBOX/o" 2>&1 || { cat "$SANDBOX/o"; return 1; }
+  grep -q "^git -c credential.helper= -C $SANDBOX/engine6 fetch --quiet origin testing" "$STUB_LOG" &&
+    grep -q "^git -C $SANDBOX/engine6 checkout --quiet testing" "$STUB_LOG"
+}
+check "boot.sh switches an existing engine clone to MACOS_REF" t_boot_switches_ref
+
+t_boot_no_tty() {
+  boot_engine_fixture "$SANDBOX/engine7"
+  MACOS_ROOT="$SANDBOX/engine7" MACOS_TTY=/nonexistent/tty /bin/bash "$BOOT" --yes >"$SANDBOX/o" 2>&1 || { cat "$SANDBOX/o"; return 1; }
+  grep -qx 'macos bootstrap --yes' "$STUB_LOG"
+}
+check "boot.sh still hands over when there is no terminal (for --yes runs)" t_boot_no_tty
+
 t_boot_clones() {
   local root="$SANDBOX/engine2"
   rm -rf "$root"; : >"$STUB_LOG"
@@ -1618,6 +1928,34 @@ t_boot_clones() {
 check "boot.sh clones the engine on a fresh machine" t_boot_clones
 
 # ---------------------------------------------------------------------------
+t_boot_curl_failure() {
+  boot_engine_fixture "$SANDBOX/engine8"
+  STUB_CURL_RC=6 HOMEBREW_PREFIX="$SANDBOX/nobrew" MACOS_ROOT="$SANDBOX/engine8" MACOS_TTY="$SANDBOX/tty" /bin/bash "$BOOT" >"$SANDBOX/o" 2>&1 && return 1
+  grep -q 'could not download the Homebrew installer' "$SANDBOX/o"
+}
+check "boot.sh stops when the Homebrew installer can't be downloaded" t_boot_curl_failure
+
+t_boot_ref_must_be_branch() {
+  boot_engine_fixture "$SANDBOX/engine9"
+  # rev-parse, fetch, checkout succeed; symbolic-ref fails (detached HEAD)
+  STUB_GIT_OUT=main STUB_GIT_RC_SEQ="0 0 0 1 0" MACOS_REF=v1.0.0 MACOS_ROOT="$SANDBOX/engine9" MACOS_TTY="$SANDBOX/tty" \
+    /bin/bash "$BOOT" >"$SANDBOX/o" 2>&1 && return 1
+  grep -q 'MACOS_REF must be a branch' "$SANDBOX/o"
+}
+check "boot.sh refuses a MACOS_REF that is not a branch" t_boot_ref_must_be_branch
+
+# ---------------------------------------------------------------------------
+section "Tripwire"
+t_tripwire() {
+  # The fixtures did write the canary, but only to the stub's database.
+  # The fixtures wrote the canary, but only into the stub's database...
+  defaults_env >/dev/null 2>&1 && "$M" defaults apply >/dev/null 2>&1
+  grep -q "|$TRIPWIRE_DOMAIN|Canary|" "$STUB_DEFAULTS_DB" || { echo "canary never written to the stub"; return 1; }
+  # ...never into the real preferences.
+  ! /usr/bin/defaults read "$TRIPWIRE_DOMAIN" Canary >/dev/null 2>&1
+}
+check "no test reached the real defaults (canary absent from real preferences)" t_tripwire
+
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 if [ "$fail" -gt 0 ]; then
   printf "Failed:$failed\n"

@@ -106,9 +106,9 @@ apps_add() {
   file="$(profiles_dir)/$profile/Brewfile"
 
   where="$(declared_in "$name" "$type")"
-  if printf '%s\n' "$where" | grep -qx "$profile $type"; then
+  if grep -qx "$profile $type" <<<"$where"; then
     skip "$type \"$name\" is already declared in $profile"
-  elif [ "$profile" != base ] && printf '%s\n' "$where" | grep -qx "base $type"; then
+  elif [ "$profile" != base ] && grep -qx "base $type" <<<"$where"; then
     die "$type \"$name\" is already declared in base, which every profile includes"
   else
     [ -f "$file" ] || printf '# %s — layered on top of base.\n' "$profile" | write_file "$file"
@@ -118,7 +118,7 @@ apps_add() {
   fi
 
   if [ "$install" = 1 ]; then
-    if printf '%s\n' "$(active_profiles)" | grep -qx "$profile"; then
+    if grep -qx "$profile" <<<"$(active_profiles)"; then
       if brew list "$(brew_flag "$type")" "$name" >/dev/null 2>&1; then
         skip "$name already installed"
       else
@@ -152,7 +152,7 @@ apps_remove() {
   # Still wanted on this Mac through another active profile?
   while read -r profile t; do
     case " $removed_from " in *" $profile "*) continue ;; esac
-    if printf '%s\n' "$(active_profiles)" | grep -qx "$profile"; then
+    if grep -qx "$profile" <<<"$(active_profiles)"; then
       still_active="$profile"
     fi
   done <<<"$where"
@@ -179,6 +179,9 @@ apps_remove() {
 
 apps_adopt() {
   local adoptable cask strays line t n profile choices
+  if [ -n "$target_profile" ] && ! grep -qx "$target_profile" <<<"$(active_profiles)"; then
+    die "adopt declares apps that are installed on this Mac, so --profile must be one it uses: $(active_profiles | tr '\n' ' ')"
+  fi
   merge_active_brewfile
 
   # 1. Declared casks whose app was installed by hand.
@@ -190,12 +193,51 @@ apps_adopt() {
     fi
   done
 
-  # 2. Brew installs no active Brewfile declares.
+  # 2. Apps installed by hand that a cask provides but nothing declares:
+  #    declare them and hand them to Homebrew.
+  local hand token app
+  hand="$(brew_hand_installed "$MERGED_BREWFILE")"
+  while IFS="$(printf '\t')" read -r token app; do
+    [ -n "$token" ] || continue
+    if [ "$token" != "${token%% *}" ]; then
+      # Several casks ship an app with this name: never guess.
+      if [ "$MACOS_YES" = 1 ]; then
+        warn "$app matches several casks ($token); run 'macos apps adopt' interactively to pick one"
+        continue
+      fi
+      # shellcheck disable=SC2086
+      choose token "$app was installed by hand; which cask is it?" $token skip
+      [ "$token" = skip ] && { skip "left $app alone"; continue; }
+    fi
+    if [ "$MACOS_YES" = 1 ] && [ -z "$target_profile" ]; then
+      warn "$app was installed by hand (cask '$token'); pass --profile <p> with --yes to adopt it"
+      continue
+    fi
+    if [ -n "$target_profile" ]; then
+      profile="$target_profile"
+    else
+      # shellcheck disable=SC2046
+      choose profile "$app was installed by hand; Homebrew has it as cask '$token'. Declare it in which profile? (skip leaves it alone)" $(active_profiles) skip
+    fi
+    [ "$profile" = skip ] && { skip "left $app alone"; continue; }
+    profile_exists "$profile" || die "no profile '$profile' in $(profiles_dir)"
+    run brew bundle add --file="$(profiles_dir)/$profile/Brewfile" --cask "$token"
+    run brew install --cask --adopt "$token"
+    ok "adopted $app as cask $token (declared in $profile)"
+    adoptable="$adoptable $token"
+  done <<EOF
+$hand
+EOF
+
+  # 3. Brew installs no active Brewfile declares.
   strays="$(brew bundle dump --file=- --no-describe --formula --cask --tap 2>/dev/null |
     { grep -E '^(tap|brew|cask) "' || true; } | while IFS= read -r line; do
       t="${line%% *}"
       n="$(printf '%s' "$line" | sed -n 's/^[a-z]* "\([^"]*\)".*/\1/p')"
-      brewfile_declares "$MERGED_BREWFILE" "$t" "$n" || echo "$t $n"
+      brewfile_declares "$MERGED_BREWFILE" "$t" "$n" && continue
+      # just adopted (declared) above
+      [ "$t" = cask ] && grep -qx "$n" <<<"$(tr ' ' '\n' <<<"$adoptable")" && continue
+      echo "$t $n"
     done)"
   if [ -z "$strays" ] && [ -z "$adoptable" ]; then
     ok "everything installed with Homebrew is declared"

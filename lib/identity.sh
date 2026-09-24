@@ -21,6 +21,10 @@
 # lib/pending.sh, lib/profile.sh and lib/dotfiles.sh.
 
 IDENTITY_VERIFIED="$MACOS_STATE/identity.verified"
+# The agent's public keys (`ssh-add -L`) as of the last run it answered:
+# lets a verified Mac keep signing, and apply orgs.conf changes, while
+# 1Password is closed. Public keys only; nothing secret.
+IDENTITY_KEY_CACHE="$MACOS_STATE/identity.agent-keys"
 AGENT_LINK="$HOME/.1password/agent.sock"
 GIT_DIR_CFG="$HOME/.config/git"
 
@@ -95,6 +99,10 @@ identity_wait_agent() {
     pending_done 1password
     return 0
   fi
+  # Already set up once: 1Password being closed right now is normal.
+  if [ -f "$IDENTITY_VERIFIED" ] && { [ "$MACOS_YES" = 1 ] || dry_run; }; then
+    return 1
+  fi
   pending_add 1password "Sign in to 1Password; in Settings → Developer turn on 'Use the SSH agent' and 'Integrate with 1Password CLI'; then run 'macos identity'"
   if agent_blocked; then
     warn "macOS is blocking access to 1Password's data folder; run 'macos identity' from your own terminal and allow access when macOS asks"
@@ -140,7 +148,7 @@ _write_if_changed() {
 
 # _signing_enabled <key> <agent keys> — sign only with a key the agent holds.
 _signing_enabled() {
-  [ -n "$1" ] && printf '%s\n' "$2" | grep -qxF "$(key_material "$1")"
+  [ -n "$1" ] && grep -qxF "$(key_material "$1")" <<<"$2"
 }
 
 identity_render() { # identity_render <agent keys, or empty when not verified>
@@ -237,7 +245,7 @@ EOF
     fi
     printf '%s\n' "$aliases" | sed '/^$/d'
   } | _write_if_changed "$HOME/.ssh/config.d/macos-identity" && changed=1
-  if [ -d "$HOME/.ssh/config.d" ]; then
+  if [ -d "$HOME/.ssh/config.d" ] && [ "$(stat -f %Lp "$HOME/.ssh/config.d")" != 700 ]; then
     run chmod 700 "$HOME/.ssh/config.d"
   fi
 
@@ -252,35 +260,95 @@ EOF
 
 # identity_upload_keys <lines> — make sure GitHub has each key, for auth and
 # signing, on the account gh is logged in as. Other accounts become pending.
-identity_upload_keys() {
-  local lines="$1" org dir email user key owners me have_auth have_sign tmp
+# _gh_keys <api path> — "type base64" per key, or fail when GitHub can't be asked.
+_gh_keys() {
+  local out
+  out="$(gh api --paginate "$1" -q '.[].key' 2>/dev/null)" || return 1
+  awk '{ print $1, $2 }' <<<"$out"
+}
+
+# _gh_whoami — the gh login, or empty; explains why when empty.
+_gh_whoami() {
+  local me
   me="$(gh api user -q .login 2>/dev/null || true)"
-  [ -n "$me" ] || { warn "gh is not logged in; skipping key uploads"; return 0; }
-  have_auth="$(gh api user/keys -q '.[].key' 2>/dev/null | awk '{ print $1, $2 }')"
-  have_sign="$(gh api user/ssh_signing_keys -q '.[].key' 2>/dev/null | awk '{ print $1, $2 }')"
+  if [ -z "$me" ]; then
+    if gh auth status -h github.com >/dev/null 2>&1; then
+      warn "couldn't reach GitHub; skipping key checks and uploads"
+    else
+      warn "gh is not logged in; skipping key checks and uploads"
+    fi
+  fi
+  printf '%s' "$me"
+}
+
+# identity_upload_keys <lines> — make sure GitHub has each key, for auth and
+# signing, on the account gh is logged in as. Keys for other accounts can't
+# be uploaded from here: they stay a pending step until GitHub shows them.
+identity_upload_keys() {
+  local lines="$1" org dir email user key owners me have_auth have_sign tmp mat
+  me="$(_gh_whoami)"
+  [ -n "$me" ] || return 0
+  if ! have_auth="$(_gh_keys user/keys)" || ! have_sign="$(_gh_keys user/ssh_signing_keys)"; then
+    warn "couldn't list your GitHub keys (token lacks admin:public_key / admin:ssh_signing_key?); skipping uploads"
+    return 0
+  fi
   while IFS='|' read -r org dir email user key owners; do
     [ -n "$org" ] && [ -n "$key" ] || continue
     user="${user:-$me}"
+    mat="$(key_material "$key")"
     if [ "$user" != "$me" ]; then
-      pending_add "github-keys-$org" "Add the $org SSH key to GitHub account $user as both an authentication and a signing key"
+      identity_other_account "$org" "$user" "$mat"
       continue
     fi
     tmp="$MACOS_STATE/tmp-$org.pub"
-    if ! printf '%s\n' "$have_auth" | grep -qxF "$(key_material "$key")"; then
-      key_material "$key" | write_file "$tmp"
-      run gh ssh-key add "$tmp" --type authentication --title "$org ($(scutil --get ComputerName 2>/dev/null || hostname))"
-      ok "uploaded $org key to GitHub for authentication"
+    if ! grep -qxF "$mat" <<<"$have_auth"; then
+      printf '%s\n' "$mat" | write_file "$tmp"
+      if run gh ssh-key add "$tmp" --type authentication --title "$org ($(scutil --get ComputerName 2>/dev/null || hostname))"; then
+        ok "uploaded $org key to GitHub for authentication"
+      else
+        warn "could not upload the $org key for authentication; add it at github.com/settings/keys"
+      fi
     fi
-    if ! printf '%s\n' "$have_sign" | grep -qxF "$(key_material "$key")"; then
-      key_material "$key" | write_file "$tmp"
-      run gh ssh-key add "$tmp" --type signing --title "$org signing"
-      ok "uploaded $org key to GitHub for signing"
+    if ! grep -qxF "$mat" <<<"$have_sign"; then
+      printf '%s\n' "$mat" | write_file "$tmp"
+      if run gh ssh-key add "$tmp" --type signing --title "$org signing"; then
+        ok "uploaded $org key to GitHub for signing"
+      else
+        warn "could not upload the $org key for signing; add it at github.com/settings/keys"
+      fi
     fi
     if [ -e "$tmp" ]; then
       run rm -f "$tmp"
     fi
   done <<EOF
 $lines
+EOF
+}
+
+# identity_other_account <org> <github user> <key material> — pending until
+# GitHub's public key lists for that user show the key (both kinds).
+identity_other_account() {
+  local auth sign
+  auth="$(_gh_keys "users/$2/keys" || true)"
+  sign="$(_gh_keys "users/$2/ssh_signing_keys" || true)"
+  if grep -qxF "$3" <<<"$auth" && grep -qxF "$3" <<<"$sign"; then
+    pending_done "github-keys-$1"
+  else
+    pending_add "github-keys-$1" "Add the $1 SSH key to GitHub account $2 as both an authentication and a signing key"
+  fi
+}
+
+# identity_check_pending_uploads <resolved lines> — clear github-keys-* steps
+# that are done (used by doctor).
+identity_check_pending_uploads() {
+  local org dir email user key owners me
+  grep -q '^github-keys-' "$MACOS_PENDING" 2>/dev/null || return 0
+  me="$(gh api user -q .login 2>/dev/null || true)"
+  while IFS='|' read -r org dir email user key owners; do
+    [ -n "$org" ] && [ -n "$key" ] && [ -n "$user" ] && [ "$user" != "$me" ] || continue
+    identity_other_account "$org" "$user" "$(key_material "$key")"
+  done <<EOF
+$1
 EOF
 }
 
@@ -320,30 +388,46 @@ EOF
 
 # --- all -------------------------------------------------------------------
 
+# identity_agent_list — `ssh-add -L` from the agent, or the cached copy from
+# the last run it answered (only on a verified Mac).
+identity_agent_list() {
+  local live
+  live="$(SSH_AUTH_SOCK="$OP_AGENT_SOCK" ssh-add -L 2>/dev/null || true)"
+  if [ -n "$live" ]; then
+    printf '%s\n' "$live"
+  elif [ -f "$IDENTITY_VERIFIED" ] && [ -f "$IDENTITY_KEY_CACHE" ]; then
+    cat "$IDENTITY_KEY_CACHE"
+  fi
+}
+
 identity_apply() {
-  local lines keys=""
+  local lines keys="" list live=0
   lines="$(orgs_lines)" || exit 1
   if [ -z "$lines" ]; then
     skip "no identities in $(orgs_file | sed "s#$HOME#~#") yet; git keeps the stowed defaults"
     return 0
   fi
 
-  if ! agent_ready && [ -f "$IDENTITY_VERIFIED" ] && { [ "$MACOS_YES" = 1 ] || dry_run; }; then
-    # Re-rendering now would drop signing and the ssh pins until the next
-    # run with 1Password open; the verified setup stays as it is.
-    skip "1Password is not answering right now; keeping the verified identity setup"
-    return 0
-  fi
   if identity_wait_agent; then
+    live=1
     identity_link_agent
-    keys="$(agent_keys)"
-    dry_run && [ -z "$keys" ] && keys="(dry run)"
+  elif [ -f "$IDENTITY_VERIFIED" ]; then
+    # Closed or locked 1Password on a Mac verified before: keep signing and
+    # the ssh pins by rendering from the keys it served last time.
+    skip "1Password is not answering; using the keys it served at the last verified run"
   fi
-  lines="$(orgs_resolve "$lines" "$(SSH_AUTH_SOCK="$OP_AGENT_SOCK" ssh-add -L 2>/dev/null || true)")"
+  list="$(identity_agent_list)"
+  keys="$(awk 'NF >= 2 { print $1, $2 }' <<<"$list")"
+  if [ "$live" = 1 ] && dry_run && [ -z "$keys" ]; then
+    keys="(dry run)"
+  fi
+  lines="$(orgs_resolve "$lines" "$list")"
   identity_render "$lines" "$keys"
 
-  if [ -z "$keys" ]; then
-    skip "ssh config and signing wait for the 1Password agent"
+  if [ "$live" = 0 ]; then
+    if [ -z "$keys" ]; then
+      skip "ssh config and signing wait for the 1Password agent"
+    fi
     return 0
   fi
 
@@ -352,6 +436,9 @@ identity_apply() {
   IDENTITY_READY=1
   if [ ! -f "$IDENTITY_VERIFIED" ]; then
     printf 'verified %s\n' "$(date +%Y-%m-%dT%H:%M:%S)" | write_file "$IDENTITY_VERIFIED"
+  fi
+  if ! dry_run && [ -n "$list" ] && [ "$(cat "$IDENTITY_KEY_CACHE" 2>/dev/null)" != "$list" ]; then
+    (umask 077 && printf '%s\n' "$list" >"$IDENTITY_KEY_CACHE")
   fi
   dotfiles_link
   identity_known_hosts

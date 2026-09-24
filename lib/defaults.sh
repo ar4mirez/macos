@@ -20,6 +20,18 @@ defaults_lines() {
       NF < 4 { printf "%s:%d: expected domain | key | type | value\n", FILENAME, FNR > "/dev/stderr"; bad = 1; next }
       {
         for (i = 1; i <= 4; i++) { gsub(/^[ \t]+|[ \t]+$/, "", $i) }
+        if ($3 !~ /^(bool|int|float|string)$/) {
+          printf "%s:%d: unknown type %s (bool, int, float or string)\n", FILENAME, FNR, $3 > "/dev/stderr"; bad = 1; next
+        }
+        if ($3 == "bool" && $4 !~ /^(true|false|yes|no|TRUE|FALSE|YES|NO|1|0)$/) {
+          printf "%s:%d: not a bool: %s\n", FILENAME, FNR, $4 > "/dev/stderr"; bad = 1; next
+        }
+        if ($3 == "int" && $4 !~ /^-?(0|[1-9][0-9]*)$/) {
+          printf "%s:%d: not an int: %s\n", FILENAME, FNR, $4 > "/dev/stderr"; bad = 1; next
+        }
+        if ($3 == "float" && $4 !~ /^-?[0-9]*\.?[0-9]+$/) {
+          printf "%s:%d: not a float: %s\n", FILENAME, FNR, $4 > "/dev/stderr"; bad = 1; next
+        }
         print $1 "|" $2 "|" $3 "|" $4
       }
       END { exit bad }' "$f" || die "invalid line(s) in $f"
@@ -45,8 +57,7 @@ _dnorm() {
         *) die "not a bool: '$2'" ;;
       esac
       ;;
-    int) printf '%d\n' "$2" ;;
-    float) awk -v v="$2" 'BEGIN { printf "%g\n", v }' ;;
+    int | float) echo "$2" ;; # written exactly as declared
     string)
       case "$2" in
         "~") echo "$HOME" ;;
@@ -76,8 +87,9 @@ defaults_state() {
   curtype="$(defaults $_DHOST read-type "$_DDOM" "$2" 2>/dev/null | sed -n 's/^Type is //p')"
   # shellcheck disable=SC2086
   cur="$(defaults $_DHOST read "$_DDOM" "$2" 2>/dev/null)" || cur="(unset)"
-  if [ "$3" = float ] && [ "$cur" != "(unset)" ]; then
-    cur="$(awk -v v="$cur" 'BEGIN { printf "%g\n", v }')"
+  # Floats compare as numbers (0 == 0.000), everything else as text.
+  if [ "$3" = float ] && [ "$cur" != "(unset)" ] && awk -v a="$cur" -v b="$want" 'BEGIN { exit !(a + 0 == b + 0) }'; then
+    cur="$want"
   fi
   if [ "$curtype" = "$(_dtypename "$3")" ] && [ "$cur" = "$want" ]; then
     echo ok

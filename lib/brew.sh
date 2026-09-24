@@ -77,8 +77,9 @@ brew_missing() {
   # `bundle check` exits 1 exactly when something is missing; that is the
   # answer we are reading, not an error.
   { brew bundle check --file="$1" --verbose --no-upgrade 2>/dev/null || true; } |
-    sed -n 's/^→ \([A-Za-z]*\) \([^ ]*\) needs to be installed.*/\1 \2/p' |
-    tr '[:upper:]' '[:lower:]'
+    sed -n -e 's/^→ \([A-Za-z]*\) \(.*\) needs to be installed.*/\1 \2/p' \
+      -e 's/^→ \([A-Za-z]*\) \(.*\) needs to be tapped.*/\1 \2/p' |
+    awk '{ $1 = tolower($1); print }'
 }
 
 # brew_bundle_install <Brewfile> — install what is missing; never upgrades
@@ -122,7 +123,7 @@ brew_prune() {
     skip "nothing to prune"
     return 0
   fi
-  if ! printf '%s\n' "$preview" | grep -q '^Would '; then
+  if ! grep -q '^Would ' <<<"$preview"; then
     printf '%s\n' "$preview" >&2
     die "brew bundle cleanup failed (exit $rc)"
   fi
@@ -163,6 +164,50 @@ brew_adoptable() {
           continue 3
         fi
       done
+    done
+  done
+}
+
+# brew_cask_catalog — "App Name.app<TAB>cask" for every cask in Homebrew's
+# local API catalog (Homebrew 7 keeps one signed packages.*.jws.json).
+# Stable tokens come before variants such as slack@beta.
+brew_cask_catalog() {
+  local f
+  local dir
+  dir="$(brew --cache 2>/dev/null)/api"
+  # Newest catalog: an older one for a previous macOS may still be there.
+  f="$(ls -t "$dir"/internal/packages.*.jws.json "$dir"/packages.*.jws.json 2>/dev/null | head -n 1)"
+  [ -n "$f" ] || return 0
+  # Variants (slack@beta) are left out; an app name that several stable
+  # casks provide is kept with all of them, so callers can ask.
+  jq -r '.payload | fromjson | .casks | to_entries[] | .key as $t
+    | (.value.raw_artifacts // [])[] | select(.[0] == ":app") | .[1][] | strings
+    | "\(.)\t\($t)"' "$f" 2>/dev/null | awk -F'\t' '$2 !~ /@/' | sort -u
+}
+
+# brew_hand_installed <Brewfile> — "casks<TAB>App path" for apps installed by
+# hand (not by Homebrew, not from the App Store) that a cask provides and
+# that no active Brewfile declares. "casks" is space-separated when several
+# casks provide an app of that name.
+brew_hand_installed() {
+  local catalog owned dir app name token t
+  catalog="$(brew_cask_catalog)"
+  [ -n "$catalog" ] || return 0
+  owned="$(brew list --cask 2>/dev/null || true)"
+  for dir in $MACOS_APPLICATIONS_DIRS; do
+    for app in "$dir"/*.app; do
+      [ -d "$app" ] || continue
+      [ -e "$app/Contents/_MASReceipt" ] && continue
+      name="$(basename "$app")"
+      # All stable casks providing this app name, space-separated.
+      token="$(awk -F'\t' -v n="$name" '$1 == n { print $2 }' <<<"$catalog" | tr '\n' ' ' | sed 's/ $//')"
+      [ -n "$token" ] || continue
+      for t in $token; do
+        if grep -qx "$t" <<<"$owned" || brewfile_declares "$1" cask "$t"; then
+          continue 2
+        fi
+      done
+      printf '%s\t%s\n' "$token" "$app"
     done
   done
 }

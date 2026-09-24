@@ -24,7 +24,15 @@ active_profiles() {
 # brewfile_declares <Brewfile> <type> <name> — exact entry present?
 brewfile_declares() {
   [ -f "$1" ] || return 1
-  awk -v t="$2" -v n="\"$3\"" '$1 == t && ($2 == n || $2 == n ",") { f = 1 } END { exit !f }' "$1"
+  awk -v t="$2" -v n="$3" '
+    { line = $0; sub(/^[ \t]+/, "", line) }
+    index(line, t) == 1 {
+      rest = substr(line, length(t) + 1)
+      if (rest !~ /^[ \t]+"/) next
+      sub(/^[ \t]+"/, "", rest)
+      if (index(rest, n "\"") == 1) { f = 1 }
+    }
+    END { exit !f }' "$1"
 }
 
 # declared_in <name> [type] — profiles whose Brewfile declares <name>, as

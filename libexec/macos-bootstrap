@@ -33,10 +33,15 @@ done
 export MACOS_YES MACOS_DRY_RUN
 
 sudo_preflight
-# A Mac is fresh when no earlier bootstrap saved its settings; only then are
-# migrations (fixes for older setups) skipped rather than run.
+# On a fresh Mac, migrations (fixes for older setups) are marked done rather
+# than run.
+BOOTSTRAPPED="$MACOS_STATE/bootstrapped"
 fresh_install=0
-[ -f "$MACOS_MACHINE_ENV" ] || fresh_install=1
+# Fresh = no bootstrap ever finished here and no migration has run: an
+# interrupted first bootstrap still counts as fresh on its re-run.
+if [ ! -f "$BOOTSTRAPPED" ] && [ ! -d "$MIGRATIONS_STATE" ]; then
+  fresh_install=1
+fi
 failed=""
 
 lock_acquire
@@ -163,4 +168,5 @@ say "Open a new terminal window (or run: exec zsh -l) to load the linked shell c
 if [ -n "$failed" ]; then
   die "bootstrap finished with errors in:$failed; fix them and re-run 'macos bootstrap' (it resumes)"
 fi
+dry_run || date +%Y-%m-%dT%H:%M:%S | write_file "$BOOTSTRAPPED"
 ok "bootstrap finished"

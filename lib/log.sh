@@ -20,18 +20,31 @@ ok() {
 }
 skip() { printf '%s  -%s %s\n' "$_C_DIM" "$_C_RESET" "$*" >&2; }
 warn() { printf '%s  !%s %s\n' "$_C_YELLOW" "$_C_RESET" "$*" >&2; }
-die()  { _MACOS_ERR_REPORTED=1; printf '%s  x%s %s\n' "$_C_RED" "$_C_RESET" "$*" >&2; exit 1; }
+die() {
+  _MACOS_ERR_REPORTED=1
+  if [ -n "${_MACOS_DIED_FLAG:-}" ]; then
+    echo died >"$_MACOS_DIED_FLAG" 2>/dev/null || true
+  fi
+  printf '%s  x%s %s\n' "$_C_RED" "$_C_RESET" "$*" >&2
+  exit 1
+}
 
 # log_to_file — mirror this process's stdout/stderr into a timestamped log
 # under $MACOS_STATE/logs. Call once, near the start of a mutating command.
 log_to_file() {
   local dir="$MACOS_STATE/logs"
   (umask 077 && mkdir -p "$dir")
+  chmod 700 "$dir" 2>/dev/null || true
+  find "$dir" -name '*.log' -perm +044 -exec chmod 600 {} + 2>/dev/null || true
   MACOS_LOG="$dir/$(date +%Y%m%d-%H%M%S)-${0##*/}.log"
   (umask 077 && : >>"$MACOS_LOG")
   export MACOS_LOG
   # Keep the real terminal on fds 4/5 for interactive tools (gh, sudo) that
   # refuse to prompt when stdout is a pipe.
+  # Keep the newest MACOS_LOG_KEEP logs (default 50).
+  { ls -1t "$dir"/*.log 2>/dev/null || true; } | tail -n +"$((${MACOS_LOG_KEEP:-50} + 1))" | while IFS= read -r old; do
+    rm -f "$old"
+  done
   exec 4>&1 5>&2
   _MACOS_OUT_FD=4 _MACOS_ERR_FD=5
   exec > >(tee -a "$MACOS_LOG") 2> >(tee -a "$MACOS_LOG" >&2)

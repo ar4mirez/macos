@@ -9,6 +9,9 @@
 
 # Files outside $HOME that the engine manages; overridable for tests.
 : "${PAM_SUDO_LOCAL:=/etc/pam.d/sudo_local}"
+# Root-owned copy of pam_reattach: sudo runs its PAM modules as root, so the
+# module must not live in the user-writable Homebrew prefix.
+: "${PAM_REATTACH_DEST:=/usr/local/lib/pam/pam_reattach.so}"
 : "${HOMEBREW_PREFIX:=/opt/homebrew}"
 
 # Where .app bundles installed outside Homebrew live (checked by `apps adopt`).

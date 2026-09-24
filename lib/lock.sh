@@ -8,7 +8,14 @@ lock_acquire() { # lock_acquire [name]
   mkdir -p "$MACOS_STATE/locks"
 
   if ! mkdir "$dir" 2>/dev/null; then
+    # The holder writes its pid right after mkdir; give it a moment.
+    local tries=0
     pid="$(cat "$dir/pid" 2>/dev/null || true)"
+    while [ -z "$pid" ] && [ "$tries" -lt 20 ]; do
+      sleep 0.1
+      tries=$((tries + 1))
+      pid="$(cat "$dir/pid" 2>/dev/null || true)"
+    done
     if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
       die "another macos run is in progress (pid $pid); lock: $dir"
     fi

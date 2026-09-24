@@ -69,6 +69,19 @@ if [ -n "${!out_var:-}" ]; then
   printf '%s\n' "${!out_var}"
 fi
 
+# STUB_<TOOL>_RC_SEQ="1 1 0": exit codes for successive calls (the last one
+# repeats), e.g. a tool that starts failing and then succeeds.
+seq_var="STUB_${var}_RC_SEQ"
+if [ -n "${!seq_var:-}" ]; then
+  seq_file="${STUB_LOG:-/tmp/stub}.seq.$var"
+  [ -f "$seq_file" ] || printf '%s\n' ${!seq_var} >"$seq_file"
+  rc="$(head -n 1 "$seq_file")"
+  if [ "$(wc -l <"$seq_file")" -gt 1 ]; then
+    tail -n +2 "$seq_file" >"$seq_file.tmp" && mv "$seq_file.tmp" "$seq_file"
+  fi
+  exit "$rc"
+fi
+
 rc="${!rc_var:-}"
 if [ -z "$rc" ]; then
   rc=0

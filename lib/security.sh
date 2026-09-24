@@ -3,26 +3,57 @@
 # analytics, hostname. Each function is idempotent and dry-run aware.
 # bash-3.2-safe. Requires lib/common.sh and lib/run.sh.
 
-# touchid_render — desired /etc/pam.d/sudo_local. pam_reattach (from the
-# pam-reattach formula) must come before pam_tid so Touch ID works in tmux.
+# pam-reattach (from Homebrew) lets Touch ID work inside tmux. sudo loads PAM
+# modules as root, so sudo_local references a root-owned copy of it, never
+# the user-writable Homebrew prefix (and uninstalling the formula later
+# cannot break sudo).
+reattach_src() { printf '%s\n' "$HOMEBREW_PREFIX/lib/pam/pam_reattach.so"; }
+
+# touchid_render — desired /etc/pam.d/sudo_local. pam_reattach must come
+# before pam_tid.
 touchid_render() {
-  local reattach="$HOMEBREW_PREFIX/lib/pam/pam_reattach.so"
   printf '# sudo_local: managed by ar4mirez/macos; survives macOS updates.\n'
-  if [ -f "$reattach" ]; then
-    printf 'auth       optional       %s\n' "$reattach"
+  if [ -f "$(reattach_src)" ] || [ -f "$PAM_REATTACH_DEST" ]; then
+    printf 'auth       optional       %s\n' "$PAM_REATTACH_DEST"
   fi
   printf 'auth       sufficient     pam_tid.so\n'
 }
 
+# reattach_install — keep the root-owned copy current with Homebrew's.
+reattach_install() {
+  local src
+  src="$(reattach_src)"
+  [ -f "$src" ] || return 0
+  if [ -f "$PAM_REATTACH_DEST" ] && cmp -s "$src" "$PAM_REATTACH_DEST"; then
+    return 0
+  fi
+  run sudo mkdir -p "$(dirname "$PAM_REATTACH_DEST")"
+  run sudo install -o root -g wheel -m 444 "$src" "$PAM_REATTACH_DEST"
+  ok "pam_reattach installed root-owned at $PAM_REATTACH_DEST"
+}
+
+# touchid_state — ok, or drift (sudo_local or the module copy out of date).
+touchid_state() {
+  if [ "$(cat "$PAM_SUDO_LOCAL" 2>/dev/null)" != "$(touchid_render)" ]; then
+    echo "drift sudo_local"
+  elif [ -f "$(reattach_src)" ] && ! cmp -s "$(reattach_src)" "$PAM_REATTACH_DEST"; then
+    echo "drift pam_reattach copy"
+  else
+    echo ok
+  fi
+}
+
 security_touchid() {
   local want backup
+  reattach_install
   want="$(touchid_render)"
   if [ -f "$PAM_SUDO_LOCAL" ] && [ "$(cat "$PAM_SUDO_LOCAL")" = "$want" ]; then
     skip "Touch ID for sudo already enabled"
     return 0
   fi
   if [ -f "$PAM_SUDO_LOCAL" ] && ! grep -q 'managed by ar4mirez/macos' "$PAM_SUDO_LOCAL"; then
-    backup="$MACOS_STATE/backup/$(date +%Y%m%d-%H%M%S)/sudo_local"
+    # Not a <timestamp> dir: uninstall restores only dotfiles backups.
+    backup="$MACOS_STATE/backup/system-$(date +%Y%m%d-%H%M%S)/sudo_local"
     run mkdir -p "$(dirname "$backup")"
     run cp "$PAM_SUDO_LOCAL" "$backup"
     warn "existing $PAM_SUDO_LOCAL backed up to $backup"

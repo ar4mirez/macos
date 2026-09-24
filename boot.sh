@@ -9,7 +9,8 @@
 # arguments given. Runs under the stock /bin/bash 3.2 and reads answers from
 # the terminal, since stdin is this script when piped from curl.
 #
-# Overrides: MACOS_REPO, MACOS_REF, MACOS_ROOT, HOMEBREW_PREFIX, MACOS_TTY.
+# Overrides: MACOS_REPO, MACOS_REF (a branch; `macos update` follows it),
+# MACOS_ROOT, HOMEBREW_PREFIX, MACOS_TTY.
 
 set -euo pipefail
 
@@ -31,8 +32,13 @@ fi
 if ! xcode-select -p >/dev/null 2>&1; then
   say "Installing the Xcode Command Line Tools; accept the dialog that opens."
   xcode-select --install >/dev/null 2>&1 || true
+  waited=0
   until xcode-select -p >/dev/null 2>&1; do
-    sleep 5
+    if [ "$waited" -ge "${MACOS_CLT_TIMEOUT:-3600}" ]; then
+      die "the Command Line Tools did not finish installing; install them (xcode-select --install) and re-run"
+    fi
+    sleep "${MACOS_CLT_POLL:-5}"
+    waited=$((waited + ${MACOS_CLT_POLL:-5}))
   done
 fi
 
@@ -41,14 +47,24 @@ fi
 if [ ! -x "$HOMEBREW_PREFIX/bin/brew" ]; then
   say "Installing Homebrew."
   sudo -v
-  NONINTERACTIVE=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+  installer="$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)" ||
+    die "could not download the Homebrew installer; check the network and re-run"
+  NONINTERACTIVE=1 /bin/bash -c "$installer" || die "the Homebrew installer failed (see above)"
 fi
+[ -x "$HOMEBREW_PREFIX/bin/brew" ] || die "Homebrew is not at $HOMEBREW_PREFIX/bin/brew after installing"
 eval "$("$HOMEBREW_PREFIX/bin/brew" shellenv)"
 
 # The engine is public; no credentials are needed (and the keychain helper is
 # kept out of it).
 if [ -d "$MACOS_ROOT/.git" ]; then
   say "Updating the engine in $MACOS_ROOT."
+  if [ "$(git -C "$MACOS_ROOT" rev-parse --abbrev-ref HEAD 2>/dev/null)" != "$MACOS_REF" ]; then
+    git -c credential.helper= -C "$MACOS_ROOT" fetch --quiet origin "$MACOS_REF" &&
+      git -C "$MACOS_ROOT" checkout --quiet "$MACOS_REF" ||
+      say "could not switch $MACOS_ROOT to $MACOS_REF; continuing with the local copy"
+    git -C "$MACOS_ROOT" symbolic-ref -q HEAD >/dev/null ||
+      die "MACOS_REF must be a branch (got '$MACOS_REF'); tags and commits leave the engine unable to update"
+  fi
   git -c credential.helper= -C "$MACOS_ROOT" pull --ff-only --quiet ||
     say "could not fast-forward $MACOS_ROOT; continuing with the local copy"
 else

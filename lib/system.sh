@@ -148,6 +148,14 @@ _capslock_agent_plist() { # the LaunchAgent that re-applies the mapping at login
 EOF
 }
 
+# _capslock_active <dst> — hidutil reports a mapping from Caps Lock to <dst>
+# (it prints the codes in decimal or hex, depending on the macOS version).
+_capslock_active() {
+  local out
+  out="$(hidutil property --get UserKeyMapping 2>/dev/null || true)"
+  grep -qiE "$((CAPSLOCK_SRC))|${CAPSLOCK_SRC#0x}" <<<"$out" && grep -qiE "$(($1))|${1#0x}" <<<"$out"
+}
+
 capslock_state() {
   local mode dst agent
   mode="$(system_setting capslock none)"
@@ -159,7 +167,7 @@ capslock_state() {
   fi
   if [ "$(cat "$agent" 2>/dev/null)" != "$(_capslock_agent_plist "$dst")" ]; then
     echo "drift LaunchAgent missing or outdated"
-  elif ! hidutil property --get UserKeyMapping 2>/dev/null | grep -qiE "$((dst))|${dst#0x}"; then
+  elif ! _capslock_active "$dst"; then
     echo "drift mapping not active"
   else
     echo ok

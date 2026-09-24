@@ -14,7 +14,7 @@ if [ -f "$MACOS_MACHINE_ENV" ]; then
     case "$_k" in
       '' | \#*) continue ;;
     esac
-    if ! printf '%s' "$_k" | grep -Eq '^MACOS_[A-Z0-9_]+$'; then
+    if ! grep -Eq '^MACOS_[A-Z0-9_]+$' <<<"$_k"; then
       continue
     fi
     if [ -z "${!_k:-}" ]; then

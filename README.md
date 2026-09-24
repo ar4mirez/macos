@@ -195,7 +195,8 @@ Conventions:
 - **Bash version:** `bin/macos`, `lib/*.sh` and any subcommand marked `# macos:bash=3` must stay **bash 3.2-safe**, because they run before Homebrew's bash is installed. Every other subcommand runs under bash 4+.
 - **Adding a command:** add one file, `libexec/macos-<name>`, with `# macos:summary=` and `# macos:usage=` headers.
 - **Script prelude:** every script sources `lib/common.sh`. It provides `set -Eeuo pipefail`, an ERR trap that names the failing `step`, and `on_exit` cleanup hooks.
-- **Pipefail:** with `pipefail` on, `cmd | grep -q` fails whenever `cmd` exits non-zero, even when `grep` matches. Write `{ cmd || true; } | grep -q` when `cmd` can fail.
+- **Pipefail:** with `pipefail` on, `cmd | grep -q` fails whenever `cmd` exits non-zero, even when `grep` matches. Write `{ cmd || true; } | grep -q` when `cmd` can fail. For shell variables use here-strings (`grep -q … <<<"$x"`), never `printf "$x" | grep -q`, which can die of SIGPIPE; a test enforces this.
+- **Tripwire:** the test fixtures declare a canary in `com.ar4mirez.macos.test-tripwire`. The suite refuses to start, and fails at the end, if the real `defaults` ever holds it.
 
 ## Roadmap
 

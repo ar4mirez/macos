@@ -31,6 +31,13 @@ sudo_keepalive() {
 sudo_preflight() {
   dry_run && return 0
   sudo -n true 2>/dev/null && return 0
-  (exec </dev/tty) 2>/dev/null && return 0
+  (exec <"${MACOS_SUDO_TTY:-/dev/tty}") 2>/dev/null && return 0
   die "administrator access is needed, but there is no terminal to type the password in. Run this from a terminal app (e.g. Terminal.app)."
+}
+
+# sudo_possible — sudo is cached or can prompt (non-fatal twin of preflight).
+sudo_possible() {
+  dry_run && return 0
+  sudo -n true 2>/dev/null && return 0
+  (exec <"${MACOS_SUDO_TTY:-/dev/tty}") 2>/dev/null
 }
