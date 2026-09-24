@@ -75,8 +75,9 @@ merge_active_brewfile() {
 # brew_missing <Brewfile> — "type name" per declared entry not installed yet.
 brew_missing() {
   # `bundle check` exits 1 exactly when something is missing; that is the
-  # answer we are reading, not an error.
-  { brew bundle check --file="$1" --verbose --no-upgrade 2>/dev/null || true; } |
+  # answer we are reading, not an error. Homebrew 7 prints the list on
+  # stderr (older versions on stdout), so read both.
+  { brew bundle check --file="$1" --verbose --no-upgrade 2>&1 || true; } |
     sed -n -e 's/^→ \([A-Za-z]*\) \(.*\) needs to be installed.*/\1 \2/p' \
       -e 's/^→ \([A-Za-z]*\) \(.*\) needs to be tapped.*/\1 \2/p' |
     awk '{ $1 = tolower($1); print }'

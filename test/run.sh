@@ -646,6 +646,18 @@ t_apply_installs() {
 }
 check "apply installs missing entries without upgrading" t_apply_installs
 
+t_missing_on_stderr() {
+  phase3_env
+  # Homebrew 7 prints `bundle check --verbose` results on stderr.
+  STUB_BREW_BUNDLE_CHECK_RC=1 STUB_BREW_BUNDLE_CHECK_ERR="brew bundle can't satisfy your Brewfile's dependencies.
+→ Cask slack needs to be installed." \
+    "$M" apply --dry-run >"$SANDBOX/o" 2>&1 || { cat "$SANDBOX/o"; return 1; }
+  grep -qx '    cask slack' "$SANDBOX/o" || { cat "$SANDBOX/o"; return 1; }
+  STUB_BREW_BUNDLE_CHECK_RC=1 STUB_BREW_BUNDLE_CHECK_ERR="→ Cask slack needs to be installed." "$M" doctor >"$SANDBOX/o" 2>&1
+  grep -q 'declared but not installed: slack' "$SANDBOX/o"
+}
+check "missing apps are found when brew reports them on stderr (Homebrew 7)" t_missing_on_stderr
+
 t_apply_dry_run() {
   phase3_env
   STUB_BREW_BUNDLE_CHECK_RC=1 STUB_BREW_BUNDLE_CHECK_OUT="→ Cask slack needs to be installed." \

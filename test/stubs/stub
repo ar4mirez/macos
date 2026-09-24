@@ -7,6 +7,7 @@
 #   STUB_LOG_ENV        space-separated variable names to append to each
 #                       logged line as [NAME=value] when set
 #   STUB_<TOOL>_OUT     text to print on stdout (tool name uppercased, - → _)
+#   STUB_<TOOL>_ERR     text to print on stderr
 #   STUB_<TOOL>_RC      exit code (default 0; `defaults read` defaults to 1,
 #                       i.e. "key does not exist")
 # OUT/RC can be narrowed to the first one to three arguments, most specific
@@ -63,10 +64,14 @@ pick() {
   echo "STUB_${var}_$1"
 }
 out_var="$(pick OUT)"
+err_var="$(pick ERR)"
 rc_var="$(pick RC)"
 
 if [ -n "${!out_var:-}" ]; then
   printf '%s\n' "${!out_var}"
+fi
+if [ -n "${!err_var:-}" ]; then
+  printf '%s\n' "${!err_var}" >&2
 fi
 
 # STUB_<TOOL>_RC_SEQ="1 1 0": exit codes for successive calls (the last one
