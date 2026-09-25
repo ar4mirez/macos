@@ -9,7 +9,7 @@
 
 # shellcheck source=lib/common.sh
 . "${MACOS_ROOT:=$(cd -- "$(dirname -- "$0")/.." && pwd -P)}/lib/common.sh"
-for _lib in run pending profile brew dotfiles defaults system brave identity engine; do
+for _lib in run pending profile brew dotfiles defaults system brave identity engine hooks; do
   # shellcheck source=/dev/null
   . "$MACOS_ROOT/lib/$_lib.sh"
 done
@@ -149,6 +149,13 @@ elif [ -z "$drift" ]; then
   good "macOS settings match the declared defaults"
 else
   meh "$(printf '%s\n' "$drift" | grep -c 'drift') setting(s) differ ('macos defaults check' for details)"
+fi
+_login="$(login_agent_state)"
+_nlogin="$(hook_files login | grep -c . || true)"
+if [ "$_login" != ok ]; then
+  meh "${_login#drift } ('macos apply' fixes it)"
+elif [ "$_nlogin" -gt 0 ]; then
+  good "login hooks: $_nlogin, run at login"
 fi
 # Clear pending steps that are visibly done.
 [ "$(browser_state)" = ok ] && pending_done browser

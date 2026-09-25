@@ -1,16 +1,20 @@
 #!/usr/bin/env bash
 # macos:summary=Link, unlink or inspect the Stow-managed dotfiles
-# macos:usage=macos dotfiles link|unlink|status [--dry-run]
+# macos:usage=macos dotfiles link|unlink|status|reset [--dry-run] [--yes]
 #
 #   link     symlink this profile's packages (base + profile stow.list) into
 #            $HOME; anything in the way is moved to ~/.local/state/macos/backup
 #   unlink   remove those symlinks (backups are left where they are)
 #   status   show each file as linked, missing or conflict; exits 1 unless
 #            everything is linked
+#   reset    back to the committed dotfiles (Omarchy's `reinstall configs`):
+#            edits made in ~/.dotfiles (by you or by an app writing through a
+#            link) are saved in a git stash there, never deleted, then
+#            everything is linked again. Asks first unless --yes.
 
 # shellcheck source=lib/common.sh
 . "${MACOS_ROOT:=$(cd -- "$(dirname -- "$0")/.." && pwd -P)}/lib/common.sh"
-for _lib in run lock profile dotfiles; do
+for _lib in run prompt lock profile dotfiles engine; do
   # shellcheck source=/dev/null
   . "$MACOS_ROOT/lib/$_lib.sh"
 done
@@ -24,11 +28,12 @@ esac
 while [ $# -gt 0 ]; do
   case "$1" in
     -n | --dry-run) MACOS_DRY_RUN=1 ;;
+    -y | --yes) MACOS_YES=1 ;;
     *) die "unknown option: $1 (see 'macos dotfiles --help')" ;;
   esac
   shift
 done
-export MACOS_DRY_RUN
+export MACOS_DRY_RUN MACOS_YES
 
 require_profile
 command -v stow >/dev/null 2>&1 || die "GNU Stow is not installed; run 'macos apply' first"
@@ -47,5 +52,27 @@ case "$action" in
     dotfiles_unlink
     ;;
   status) dotfiles_status ;;
-  *) die "unknown action '$action' (link, unlink or status)" ;;
+  reset)
+    if dotfiles_is_dev; then
+      die "your dotfiles are linked from your dev clone ($MACOS_DOTFILES); reset only resets the installed copy. Use git in your clone, or 'macos dev unlink' first."
+    fi
+    lock_acquire
+    dry_run || log_to_file
+    dry_run && say "Dry run: nothing will be changed."
+    changes="$(git -C "$MACOS_DOTFILES" status --porcelain 2>/dev/null)"
+    if [ -z "$changes" ]; then
+      skip "no local changes in $MACOS_DOTFILES"
+    else
+      say "Local changes in $MACOS_DOTFILES:"
+      printf '%s\n' "$changes" | sed 's/^/    /' >&2
+      if ! dry_run && ! confirm "Put them aside in a git stash and go back to the committed dotfiles?"; then
+        skip "nothing changed"
+        exit 0
+      fi
+      run git -C "$MACOS_DOTFILES" stash push --include-untracked --quiet -m "macos dotfiles reset $(date +%Y-%m-%dT%H:%M:%S)"
+      ok "changes saved: 'git -C $MACOS_DOTFILES stash list' shows them, 'stash pop' brings them back"
+    fi
+    dotfiles_link
+    ;;
+  *) die "unknown action '$action' (link, unlink, status or reset)" ;;
 esac

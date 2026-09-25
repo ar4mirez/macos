@@ -8,7 +8,7 @@
 
 # shellcheck source=lib/common.sh
 . "${MACOS_ROOT:=$(cd -- "$(dirname -- "$0")/.." && pwd -P)}/lib/common.sh"
-for _lib in run prompt lock pending sudo security brew profile dotfiles defaults system brave identity; do
+for _lib in run prompt lock pending sudo security brew profile dotfiles defaults system brave identity hooks; do
   # shellcheck source=/dev/null
   . "$MACOS_ROOT/lib/$_lib.sh"
 done
@@ -73,6 +73,7 @@ mise_install
 step "Defaults"
 defaults_apply
 system_apply
+login_agent_apply
 
 # Never waits on 1Password here. Without the agent it renders identities
 # (from the keys cached at the last verified run, if any).
@@ -81,5 +82,9 @@ MACOS_YES=1 identity_apply
 
 if [ -n "$failed" ]; then
   die "apply finished with errors in:$failed"
+fi
+if [ -n "$(hook_files post-apply)" ]; then
+  step "Hooks (post-apply)"
+  hooks_run post-apply
 fi
 ok "apply finished"

@@ -1787,6 +1787,145 @@ t_update_no_upgrade_after_failed_apply() {
 }
 check "update does not upgrade on top of a failed apply" t_update_no_upgrade_after_failed_apply
 
+# ---------------------------------------------------------------------------
+section "hooks and dotfiles reset"
+
+# hook <dir> <name> <body> [mode] — write a hook script (executable unless mode=plain).
+hook() {
+  mkdir -p "$1"
+  printf '#!/bin/bash\n%s\n' "$3" >"$1/$2"
+  [ "${4:-}" = plain ] || chmod +x "$1/$2"
+}
+P="$MACOS_DOTFILES/macos/profiles"
+
+hooks_env() {
+  phase3_env
+  rm -rf "$HOME/.config/macos" "$HOME/Library/LaunchAgents" "$SANDBOX/hooks.log"
+}
+
+t_hooks_post_apply() {
+  hooks_env
+  hook "$P/base/hooks/post-apply.d" 10-a "echo a >>$SANDBOX/hooks.log"
+  hook "$P/base/hooks/post-apply.d" 15-x.sample "echo sample >>$SANDBOX/hooks.log"
+  hook "$P/base/hooks/post-apply.d" 25-fail "exit 3"
+  hook "$P/work/hooks/post-apply.d" 20-b "echo b >>$SANDBOX/hooks.log" plain
+  hook "$HOME/.config/macos/hooks/post-apply.d" 30-c "echo c \$MACOS_HOOK_EVENT >>$SANDBOX/hooks.log"
+  "$M" apply >"$SANDBOX/o" 2>&1 || { cat "$SANDBOX/o"; return 1; }
+  [ "$(cat "$SANDBOX/hooks.log")" = "$(printf 'a\nb\nc post-apply')" ] &&
+    grep -q 'hook failed: base/hooks/post-apply.d/25-fail (exit 3)' "$SANDBOX/o" && grep -q 'apply finished' "$SANDBOX/o" ||
+    { cat "$SANDBOX/o" "$SANDBOX/hooks.log"; return 1; }
+}
+check "post-apply hooks run in order (profiles, then this Mac's), skip samples, and a failure never stops apply" t_hooks_post_apply
+
+t_hooks_dry_run() {
+  hooks_env
+  hook "$P/base/hooks/post-apply.d" 10-a "echo a >>$SANDBOX/hooks.log"
+  "$M" apply --dry-run >"$SANDBOX/o" 2>&1 || { cat "$SANDBOX/o"; return 1; }
+  [ ! -f "$SANDBOX/hooks.log" ] && grep -q 'would run hook: base/hooks/post-apply.d/10-a' "$SANDBOX/o"
+}
+check "apply --dry-run lists hooks without running them" t_hooks_dry_run
+
+t_hooks_not_after_failed_apply() {
+  hooks_env
+  hook "$P/base/hooks/post-apply.d" 10-a "echo a >>$SANDBOX/hooks.log"
+  STUB_BREW_BUNDLE_CHECK_RC=1 STUB_BREW_BUNDLE_INSTALL_RC=1 "$M" apply >"$SANDBOX/o" 2>&1 && return 1
+  [ ! -f "$SANDBOX/hooks.log" ]
+}
+check "post-apply hooks don't run when apply fails" t_hooks_not_after_failed_apply
+
+t_login_agent() {
+  hooks_env
+  local agent="$HOME/Library/LaunchAgents/com.ar4mirez.macos.login.plist"
+  "$M" apply >/dev/null 2>&1 && [ ! -f "$agent" ] || return 1
+  hook "$P/base/hooks/login.d" slack "open -a Slack"
+  "$M" apply >"$SANDBOX/o" 2>&1 || { cat "$SANDBOX/o"; return 1; }
+  plutil -lint "$agent" >/dev/null && grep -q "<string>$HOME/.local/bin/macos</string>" "$agent" &&
+    grep -q '<string>login</string>' "$agent" && grep -q 'login-hooks.log' "$agent" || { cat "$agent"; return 1; }
+  "$M" apply >"$SANDBOX/o" 2>&1 && grep -q 'login hooks: 1 (run at login)' "$SANDBOX/o" || { cat "$SANDBOX/o"; return 1; }
+  "$M" doctor >"$SANDBOX/o" 2>&1; grep -q 'login hooks: 1, run at login' "$SANDBOX/o" || { cat "$SANDBOX/o"; return 1; }
+  rm "$agent"
+  "$M" doctor >"$SANDBOX/o" 2>&1; grep -q 'login agent missing or outdated' "$SANDBOX/o" || { cat "$SANDBOX/o"; return 1; }
+  "$M" apply >/dev/null 2>&1 && [ -f "$agent" ] || return 1
+  rm -rf "$P/base/hooks/login.d"
+  "$M" apply >"$SANDBOX/o" 2>&1 && [ ! -f "$agent" ] && grep -q 'login agent removed' "$SANDBOX/o"
+}
+check "a login hook installs the login agent (doctor checks it); no login hooks removes it" t_login_agent
+
+t_hook_run_login_background() {
+  hooks_env
+  hook "$P/base/hooks/login.d" daemon "sleep 2; echo finished >>$SANDBOX/hooks.log"
+  "$M" hook run login >"$SANDBOX/o" 2>&1 || { cat "$SANDBOX/o"; return 1; }
+  [ ! -f "$SANDBOX/hooks.log" ] || return 1   # returned before the hook finished
+  local i=0
+  while [ ! -f "$SANDBOX/hooks.log" ] && [ $i -lt 50 ]; do sleep 0.1; i=$((i + 1)); done
+  grep -qx finished "$SANDBOX/hooks.log"
+}
+check "login hooks start in the background, so a long-running one doesn't block" t_hook_run_login_background
+
+t_hook_list_and_invalid() {
+  hooks_env
+  hook "$P/work/hooks/post-update.d" notify "true"
+  hook "$HOME/.config/macos/hooks/login.d" mine "true"
+  "$M" hook >"$SANDBOX/o" 2>&1 || { cat "$SANDBOX/o"; return 1; }
+  grep -q '^  work/hooks/post-update.d/notify$' "$SANDBOX/o" && grep -q '^  ~/.config/macos/hooks/login.d/mine$' "$SANDBOX/o" || { cat "$SANDBOX/o"; return 1; }
+  "$M" hook run boot >"$SANDBOX/o" 2>&1 && return 1
+  grep -q "unknown hook event 'boot'" "$SANDBOX/o"
+}
+check "hook lists every hook by event and source, and refuses unknown events" t_hook_list_and_invalid
+
+t_update_post_update_hooks() {
+  migrations_env
+  rm -rf "$HOME/.config/macos" "$SANDBOX/hooks.log"
+  hook "$P/base/hooks/post-update.d" 10-a "echo updated >>$SANDBOX/hooks.log"
+  "$M" update --yes >"$SANDBOX/o" 2>&1 || { cat "$SANDBOX/o"; return 1; }
+  grep -qx updated "$SANDBOX/hooks.log" && grep -q 'upgrade finished' "$SANDBOX/o" || { cat "$SANDBOX/o"; return 1; }
+  "$M" update --yes --no-upgrade >/dev/null 2>&1 && [ "$(grep -c updated "$SANDBOX/hooks.log")" -eq 2 ] || return 1
+  "$M" update --dry-run >"$SANDBOX/o" 2>&1 && [ "$(grep -c updated "$SANDBOX/hooks.log")" -eq 2 ] && grep -q 'would run hook: base/hooks/post-update.d/10-a' "$SANDBOX/o"
+}
+check "update runs post-update hooks at the end (also with --no-upgrade; previewed on --dry-run)" t_update_post_update_hooks
+
+reset_env() {
+  phase3_env
+  rm -rf "$HOME" && mkdir -p "$HOME"
+  rm -rf "$MACOS_DOTFILES/.git"
+  mkdir -p "$MACOS_DOTFILES/shell/.config/shell"
+  echo committed >"$MACOS_DOTFILES/shell/.config/shell/rc"
+  printf 'shell\n' >"$P/base/stow.list"
+  G init -q -b main "$MACOS_DOTFILES" && G -C "$MACOS_DOTFILES" add -A && G -C "$MACOS_DOTFILES" commit -qm base
+  "$M" dotfiles link >/dev/null 2>&1
+}
+
+t_dotfiles_reset() {
+  reset_env
+  echo edited >"$HOME/.config/shell/rc"            # through the link, into the repo
+  echo stray >"$MACOS_DOTFILES/shell/.config/shell/new"
+  rm "$HOME/.config/shell/rc" && echo replaced >"$HOME/.config/shell/rc"   # an app replaced the link
+  PATH="$REALGIT:$PATH" "$M" dotfiles reset --yes >"$SANDBOX/o" 2>&1 || { cat "$SANDBOX/o"; return 1; }
+  [ -L "$HOME/.config/shell/rc" ] && [ "$(cat "$HOME/.config/shell/rc")" = committed ] &&
+    [ ! -e "$MACOS_DOTFILES/shell/.config/shell/new" ] && [ -z "$(G -C "$MACOS_DOTFILES" status --porcelain)" ] &&
+    [ "$(G -C "$MACOS_DOTFILES" stash list | wc -l | tr -d ' ')" -eq 1 ] &&
+    G -C "$MACOS_DOTFILES" stash show --include-untracked --name-only | grep -q 'shell/.config/shell/new' || { cat "$SANDBOX/o"; return 1; }
+  # What the link replaced is in the backup, not lost.
+  grep -rqx replaced "$MACOS_STATE/backup"
+}
+check "dotfiles reset stashes edits (nothing lost), restores the committed files and relinks" t_dotfiles_reset
+
+t_dotfiles_reset_declined() {
+  reset_env
+  echo edited >"$HOME/.config/shell/rc"
+  printf 'n\n' >"$SANDBOX/answers"
+  MACOS_TTY="$SANDBOX/answers" PATH="$REALGIT:$PATH" "$M" dotfiles reset >"$SANDBOX/o" 2>&1 || { cat "$SANDBOX/o"; return 1; }
+  [ "$(cat "$HOME/.config/shell/rc")" = edited ] && [ -z "$(G -C "$MACOS_DOTFILES" stash list)" ] && grep -q 'nothing changed' "$SANDBOX/o"
+}
+check "dotfiles reset asks first and changes nothing on no" t_dotfiles_reset_declined
+
+t_dotfiles_reset_dev() {
+  reset_env
+  MACOS_DOTFILES_INSTALLED="$SANDBOX/elsewhere" "$M" dotfiles reset --yes >"$SANDBOX/o" 2>&1 && return 1
+  grep -q 'linked from your dev clone' "$SANDBOX/o"
+}
+check "dotfiles reset refuses to touch a dev clone" t_dotfiles_reset_dev
+
 t_bootstrap_marks_migrations() {
   bootstrap_env
   rm -rf "$MACOS_MIGRATIONS_DIR" && mkdir -p "$MACOS_MIGRATIONS_DIR" && printf 'touch "%s/ran"\n' "$SANDBOX" >"$MACOS_MIGRATIONS_DIR/100.sh"

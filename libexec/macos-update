@@ -7,7 +7,8 @@
 # with --autostash so uncommitted edits survive; a conflict aborts the
 # rebase and stops. After migrations, the freshly pulled engine runs
 # `macos apply`, then `macos upgrade` (Homebrew, App Store, mise, Neovim
-# plugins, macOS updates). --no-upgrade stops after apply.
+# plugins, macOS updates), then your post-update hooks. --no-upgrade skips
+# the upgrade.
 
 # shellcheck source=lib/common.sh
 . "${MACOS_ROOT:=$(cd -- "$(dirname -- "$0")/.." && pwd -P)}/lib/common.sh"
@@ -102,10 +103,16 @@ if [ "${_MACOS_DIED_OWNER:-}" = "$$" ]; then
   rm -f "$_MACOS_DIED_FLAG"
 fi
 unset _MACOS_DIED_FLAG _MACOS_DIED_OWNER
-if [ "$upgrade" = 0 ]; then
-  exec "$MACOS_ROOT/bin/macos" apply ${apply_args[@]+"${apply_args[@]}"}
-fi
 # Upgrading on top of a failed apply would build on a Mac that isn't in its
 # declared state; stop, as Omarchy's update does when its packages fail.
 "$MACOS_ROOT/bin/macos" apply ${apply_args[@]+"${apply_args[@]}"} || exit
-exec "$MACOS_ROOT/bin/macos" upgrade ${apply_args[@]+"${apply_args[@]}"}
+rc=0
+if [ "$upgrade" = 1 ]; then
+  "$MACOS_ROOT/bin/macos" upgrade ${apply_args[@]+"${apply_args[@]}"} || rc=$?
+fi
+# post-update hooks run from the freshly pulled engine, even when part of the
+# upgrade failed (Omarchy runs them once packages and migrations are done).
+dry_args=()
+dry_run && dry_args=(--dry-run)
+"$MACOS_ROOT/bin/macos" hook run post-update ${dry_args[@]+"${dry_args[@]}"} || true
+exit "$rc"

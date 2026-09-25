@@ -24,6 +24,7 @@ The engine (this repo, public) holds no personal data. Brewfiles, `defaults.conf
 ## Defaults
 - `defaults.conf` has one line per setting: `domain | key | type | value`. The domain can be `-g` or `@currentHost:<domain>`.
 - Each write is read back, with bools normalised, to confirm it took effect. `defaults check` reports drift and writes nothing.
+- Hooks (`lib/hooks.sh`) are per-profile data like everything else: `macos/profiles/<p>/hooks/<event>.d/`, then `~/.config/macos/hooks/`. `login` hooks run from one LaunchAgent, which `apply` installs only while a login hook exists.
 - Settings that aren't a single key (Dock layout, Caps Lock, keyboard shortcuts, default browser, the Brave policy profile) are named imperative steps, configured by `dock.conf`, `system.conf` and `brave.mobileconfig`.
 
 ## Bootstrap constraints

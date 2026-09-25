@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+# macos:summary=List or run your hook scripts (post-apply, post-update, login)
+# macos:usage=macos hook [list] | run <event> [args...] [--dry-run]
+#
+#   list          every hook, by event, and where it comes from
+#   run <event>   run an event's hooks now (the login agent runs `login`)
+#
+# Hooks are executable scripts in <event>.d/ directories: in the dotfiles
+# repo under macos/profiles/<profile>/hooks/ (for every Mac using that
+# profile or add-on), and in ~/.config/macos/hooks/ (this Mac only). Files
+# ending in .sample are skipped. See lib/hooks.sh.
+
+# shellcheck source=lib/common.sh
+. "${MACOS_ROOT:=$(cd -- "$(dirname -- "$0")/.." && pwd -P)}/lib/common.sh"
+for _lib in run profile hooks; do
+  # shellcheck source=/dev/null
+  . "$MACOS_ROOT/lib/$_lib.sh"
+done
+unset _lib
+
+action="list"
+case "${1:-}" in
+  "" | -*) ;;
+  *) action="$1"; shift ;;
+esac
+
+require_profile
+
+case "$action" in
+  list)
+    for e in $HOOK_EVENTS; do
+      printf '%s\n' "$e"
+      files="$(hook_files "$e")"
+      if [ -z "$files" ]; then
+        printf '  (none)\n'
+      else
+        printf '%s\n' "$files" | sed -e "s#^$MACOS_DOTFILES/macos/profiles/#  #" -e "s#^$(hooks_local_dir)/#  ~/.config/macos/hooks/#"
+      fi
+    done
+    ;;
+  run)
+    event="${1:-}"
+    [ -n "$event" ] || die "usage: macos hook run <event> [args...] (events: $HOOK_EVENTS)"
+    shift
+    args=()
+    for a in "$@"; do
+      case "$a" in
+        -n | --dry-run) MACOS_DRY_RUN=1 ;;
+        *) args+=("$a") ;;
+      esac
+    done
+    export MACOS_DRY_RUN
+    hooks_run "$event" ${args[@]+"${args[@]}"}
+    ;;
+  *) die "unknown action '$action' (list or run)" ;;
+esac

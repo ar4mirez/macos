@@ -70,7 +70,8 @@ macos apply       Converge apps, dotfiles, runtimes, settings and identity (--pr
 macos upgrade     Upgrade Homebrew, App Store, mise, Neovim plugins and macOS
 macos apps        add | remove | adopt apps in a profile Brewfile
 macos addons      list | add | remove optional add-on profiles (e.g. gaming)
-macos dotfiles    link | unlink | status
+macos dotfiles    link | unlink | status | reset
+macos hook        list | run <event>: your scripts at post-apply, post-update and login
 macos defaults    apply | check
 macos identity    1Password SSH agent, git identities, commit signing
 macos brave       list | add | remove | adopt extensions for every Brave profile
@@ -129,12 +130,36 @@ Each top-level directory of the dotfiles repo is a Stow package that mirrors `$H
 macos dotfiles status    # linked / missing / conflict per file; exits 1 on drift
 macos dotfiles link      # also part of `macos apply` and `macos bootstrap`
 macos dotfiles unlink
+macos dotfiles reset     # back to the committed dotfiles; local edits go to a git stash
 ```
 
 - **Linking:** files are linked one at a time (`stow --no-folding`), so `~/.config` stays a real directory.
 - **Files in the way:** anything already at a target path (a real file, or a symlink pointing elsewhere) is moved to `~/.local/state/macos/backup/<timestamp>/` first. `stow --adopt` is never used, so nothing is pulled into the repo.
 - **Machine-only additions:** `~/.zshrc.local` and `~/.config/git/config.local` are sourced or included, but never committed.
 - **Runtimes:** after linking, `apply` runs `mise install` for the runtimes in the mise package.
+- **Reset:** `macos dotfiles reset` is Omarchy's `reinstall configs`. It covers edits made to the installed `~/.dotfiles`, whether you made them or an app wrote through a link or replaced one. It lists them, asks, saves them in a git stash (so `git -C ~/.dotfiles stash pop` brings them back), then links everything again. It refuses to touch a dev clone.
+
+## Hooks and login items
+
+Hooks are your own scripts, run at engine events, as Omarchy's are:
+
+| Event | When |
+|---|---|
+| `post-apply` | at the end of a successful `macos apply` |
+| `post-update` | at the end of `macos update`, even if part of the upgrade failed |
+| `login` | at every login, each in the background. This is how to start apps and daemons (Omarchy's autostart), or run anything after login (its `post-boot`) |
+
+- **Where they go:** a hook is a file in an `<event>.d/` directory.
+  - In the dotfiles repo under `macos/profiles/<profile>/hooks/`, it runs on every Mac using that profile or add-on.
+  - In `~/.config/macos/hooks/`, it runs on this Mac only and is never committed.
+- **Order:** profile directories come first (base, the profile, the add-ons), then this Mac's own. Within a directory, files run in name order.
+- **Running:** executable files run directly; others run with bash. `*.sample` files are skipped. A hook that fails is reported, and the engine carries on.
+- **Login:** while any `login` hook exists, `apply` keeps a LaunchAgent (`com.ar4mirez.macos.login`) that runs `macos hook run login` at login. Output goes to `~/.local/state/macos/logs/login-hooks.log`. `doctor` checks the agent.
+
+```sh
+macos hook                   # every hook, by event, and where it comes from
+macos hook run post-update   # run an event's hooks now
+```
 
 ## macOS settings
 
