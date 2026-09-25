@@ -16,7 +16,7 @@ This repo is only the **engine**. It holds no personal data. Everything personal
 
 ```
 ~/.dotfiles/
-  macos/profiles/{base,work,personal}/   main profiles (a Mac has one)
+  macos/profiles/{base,work,personal}/   main profiles (a Mac has one; others stack)
   macos/profiles/<add-on>/                optional add-ons, e.g. gaming (same files)
       Brewfile            apps for this profile
       defaults.conf       domain | key | type | value
@@ -85,13 +85,18 @@ Every command that changes something supports `--dry-run`, takes a lock so two r
 
 ## Add-on profiles
 
-An add-on is an optional layer on top of a Mac's profile. Any directory under `macos/profiles/` other than `base`, `work` and `personal` is one, and it holds the same files a profile does: a Brewfile, `defaults.conf`, `system.conf`, `stow.list` and so on.
+An add-on is an optional layer on top of a Mac's profile. Any profile directory can be stacked this way, except `base`, which is always on, and the Mac's own main profile. That includes optional ones like `gaming`, and also another main profile: a `work` Mac can stack `personal` and get both, instead of switching between them. Add-ons hold the same files a profile does: a Brewfile, `defaults.conf`, `system.conf`, `stow.list` and so on.
 
-Each Mac chooses its own add-ons, which are saved in `machine.env` as `MACOS_ADDONS`. They're layered after the main profile, so an add-on's settings override the profile's.
+Each Mac chooses its own add-ons, which are saved in `machine.env` as `MACOS_ADDONS`. They're layered after the main profile, in the order you added them:
+- **Brewfiles:** merged, so the Mac gets every app from every layer.
+- **Settings** (`defaults.conf`, `system.conf`): the last layer that sets a key wins.
+- **`stow.list`:** the packages add up.
+- **Dock** (`dock.conf`): the last layer that has one replaces the rest, so to keep the main profile's Dock, don't give the add-on a `dock.conf`.
 
 ```sh
 macos addons                      # which add-ons exist, and which this Mac uses
 macos addons add gaming           # turn one on, then run `macos apply`
+macos addons add personal         # stack another main profile: this Mac becomes work + personal
 macos addons remove gaming        # turn it off; `macos apply --prune` then offers to remove its apps
 macos apps add steam --cask --profile gaming   # declare an app in an add-on
 macos bootstrap --profile personal --addons gaming   # or choose them at bootstrap

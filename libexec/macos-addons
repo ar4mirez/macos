@@ -8,10 +8,10 @@
 #                   its apps stay installed until `macos apply --prune`,
 #                   which lists them and asks first
 #
-# An add-on is any directory under macos/profiles/ other than base, work and
-# personal. It holds the same files as a profile (Brewfile, defaults.conf,
-# system.conf, stow.list, ...) and is layered after this Mac's profile. The
-# choice is per Mac, kept in machine.env (MACOS_ADDONS).
+# An add-on is any profile directory under macos/profiles/ other than base
+# and this Mac's main profile: an optional one like gaming, or another main
+# profile to stack (work + personal). It is layered after this Mac's
+# profile. The choice is per Mac, kept in machine.env (MACOS_ADDONS).
 
 # shellcheck source=lib/common.sh
 . "${MACOS_ROOT:=$(cd -- "$(dirname -- "$0")/.." && pwd -P)}/lib/common.sh"
@@ -52,7 +52,7 @@ case "$action" in
   list)
     avail="$(available_addons)"
     if [ -z "$avail" ]; then
-      say "No add-ons in $(profiles_dir) (any directory there other than $MAIN_PROFILES is one)."
+      say "Nothing to stack: $(profiles_dir) has no profile besides base and $MACOS_PROFILE."
       exit 0
     fi
     for a in $avail; do
@@ -66,7 +66,8 @@ case "$action" in
     [ -n "$names" ] || die "usage: macos addons add <name>... (see 'macos addons list')"
     list="$(machine_addons)"
     for a in $names; do
-      is_main_profile "$a" && die "'$a' is a main profile, not an add-on"
+      why="$(addon_refusal "$a" "$MACOS_PROFILE")"
+      [ -z "$why" ] || die "can't add '$a': $why"
       profile_exists "$a" || die "no add-on '$a' in $(profiles_dir) (available: $(available_addons | tr '\n' ' '))"
       if enabled "$a"; then
         skip "add-on $a already on"

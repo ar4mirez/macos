@@ -771,10 +771,23 @@ t_addons_add_invalid() {
   addons_env
   "$M" addons add nope >"$SANDBOX/o" 2>&1 && return 1
   grep -q "no add-on 'nope'" "$SANDBOX/o" || return 1
-  "$M" addons add personal >"$SANDBOX/o" 2>&1 && return 1
-  grep -q "'personal' is a main profile" "$SANDBOX/o" && ! grep -q MACOS_ADDONS "$MACOS_STATE/machine.env" && ! grep -q 'bundle install' "$STUB_LOG"
+  "$M" addons add work >"$SANDBOX/o" 2>&1 && return 1
+  grep -q "'work' is this Mac's main profile already" "$SANDBOX/o" || return 1
+  "$M" addons add base >"$SANDBOX/o" 2>&1 && return 1
+  grep -q "base is always on" "$SANDBOX/o" && ! grep -q MACOS_ADDONS "$MACOS_STATE/machine.env" && ! grep -q 'bundle install' "$STUB_LOG"
 }
-check "addons add refuses unknown names and main profiles, changing nothing" t_addons_add_invalid
+check "addons add refuses unknown names, base and the Mac's own profile, changing nothing" t_addons_add_invalid
+
+t_addons_stack_main_profile() {
+  addons_env
+  mkdir -p "$MACOS_DOTFILES/macos/profiles/personal"
+  printf 'cask "signal"\n' >"$MACOS_DOTFILES/macos/profiles/personal/Brewfile"
+  "$M" addons >"$SANDBOX/o" 2>&1 && grep -qx '  off  personal' "$SANDBOX/o" && ! grep -q ' work$' "$SANDBOX/o" || { cat "$SANDBOX/o"; return 1; }
+  "$M" addons add personal gaming >"$SANDBOX/o" 2>&1 || { cat "$SANDBOX/o"; return 1; }
+  grep -qx 'MACOS_ADDONS="personal gaming"' "$MACOS_STATE/machine.env" && grep -q '==> Apps (work + personal + gaming)' "$SANDBOX/o" &&
+    grep -qx 'cask "slack"' "$MACOS_STATE/Brewfile" && grep -qx 'cask "signal"' "$MACOS_STATE/Brewfile" && grep -qx 'cask "steam"' "$MACOS_STATE/Brewfile"
+}
+check "another main profile stacks as an add-on (work + personal), keeping the Mac's own" t_addons_stack_main_profile
 
 t_addons_remove() {
   addons_env
@@ -828,10 +841,10 @@ t_bootstrap_addons() {
     "$M" bootstrap --yes --profile work --addons gaming --hostname x >"$SANDBOX/o" 2>&1 || { cat "$SANDBOX/o"; return 1; }
   grep -qx 'MACOS_ADDONS="gaming"' "$MACOS_STATE/machine.env" && grep -qx 'cask "steam"' "$MACOS_STATE/Brewfile" || { cat "$SANDBOX/o"; return 1; }
   bootstrap_env
-  "$M" bootstrap --yes --profile work --addons personal --hostname x >"$SANDBOX/o" 2>&1 && return 1
-  grep -q "'personal' is a main profile" "$SANDBOX/o"
+  "$M" bootstrap --yes --profile work --addons work --hostname x >"$SANDBOX/o" 2>&1 && return 1
+  grep -q "'work' is this Mac's main profile already" "$SANDBOX/o"
 }
-check "bootstrap --addons records add-ons, merges their Brewfiles, and refuses main profiles" t_bootstrap_addons
+check "bootstrap --addons records add-ons, merges their Brewfiles, and refuses the chosen profile itself" t_bootstrap_addons
 
 # ---------------------------------------------------------------------------
 section "upgrade"

@@ -105,8 +105,9 @@ if [ "$profile" != base ] && ! dry_run && [ ! -d "$MACOS_DOTFILES/macos/profiles
   die "profile '$profile' not found in $MACOS_DOTFILES/macos/profiles"
 fi
 for _a in $(machine_addons); do
-  if is_main_profile "$_a"; then
-    die "'$_a' is a main profile, not an add-on"
+  _why="$(addon_refusal "$_a" "$profile")"
+  if [ -n "$_why" ]; then
+    die "can't add '$_a': $_why"
   elif ! dry_run && ! profile_exists "$_a"; then
     die "add-on '$_a' not found in $MACOS_DOTFILES/macos/profiles"
   fi

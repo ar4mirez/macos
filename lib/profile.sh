@@ -4,9 +4,12 @@
 
 profiles_dir() { printf '%s\n' "$MACOS_DOTFILES/macos/profiles"; }
 
-# A Mac has exactly one main profile. Every other directory under
-# profiles/ is an add-on: optional, any number per Mac (MACOS_ADDONS in
-# machine.env), layered after the main profile in the same file formats.
+# A Mac has exactly one main profile, chosen at bootstrap from MAIN_PROFILES.
+# Any other profile directory can be stacked on top as an add-on: optional
+# ones like gaming, or another main profile (a work Mac adding personal).
+# Add-ons are per Mac (MACOS_ADDONS in machine.env), any number, layered
+# after the main profile in the same file formats.
+# shellcheck disable=SC2034 # read by macos-bootstrap
 MAIN_PROFILES="work personal base"
 
 # require_profile — this machine must have been bootstrapped, and its
@@ -20,20 +23,26 @@ require_profile() {
   done
 }
 
-# is_main_profile <name>
-is_main_profile() {
-  case " $MAIN_PROFILES " in *" $1 "*) return 0 ;; esac
-  return 1
+# addon_refusal <name> <main profile> — why <name> can't be stacked on a Mac
+# whose main profile is <main>, or nothing when it can.
+addon_refusal() {
+  if [ "$1" = base ]; then
+    echo "base is always on"
+  elif [ "$1" = "$2" ]; then
+    echo "'$1' is this Mac's main profile already"
+  fi
 }
 
-# available_addons — add-on names in the dotfiles repo, sorted.
+# available_addons — profiles this Mac can stack, sorted: every profile
+# directory except base and its main profile.
 available_addons() {
   local d n
   for d in "$(profiles_dir)"/*/; do
     [ -d "$d" ] || continue
     n="$(basename "$d")"
-    is_main_profile "$n" || printf '%s\n' "$n"
+    [ -z "$(addon_refusal "$n" "${MACOS_PROFILE:-}")" ] && printf '%s\n' "$n"
   done
+  return 0
 }
 
 # machine_addons — the add-ons enabled on this Mac, one per line.
